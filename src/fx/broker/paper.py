@@ -1,0 +1,155 @@
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+
+from fx.broker.base import (
+    BrokerAdapter,
+    BrokerCapabilities,
+    BrokerEnvironment,
+    Order,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    Position,
+    Tick,
+)
+
+
+class PaperBroker(BrokerAdapter):
+    """In-memory simulated broker for backtesting and paper trading."""
+
+    def __init__(self, initial_balance: float = 1_000_000.0) -> None:
+        self._balance = initial_balance
+        self._orders: dict[str, Order] = {}
+        self._positions: dict[str, Position] = {}
+        self._ticks: dict[str, Tick] = {}
+
+    @property
+    def name(self) -> str:
+        return "paper"
+
+    @property
+    def environment(self) -> BrokerEnvironment:
+        return BrokerEnvironment.PRACTICE
+
+    @property
+    def capabilities(self) -> BrokerCapabilities:
+        return BrokerCapabilities(
+            supports_rest_api=False,
+            supports_streaming_price=False,
+            supports_market_order=True,
+            supports_limit_order=True,
+            supports_stop_loss=True,
+            supports_take_profit=True,
+            supports_position_close=True,
+            supports_reverse_order=True,
+            supports_demo=True,
+            min_trade_units=1,
+            max_leverage=25,
+            spread_source="simulated",
+        )
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    def inject_tick(self, tick: Tick) -> None:
+        self._ticks[tick.instrument] = tick
+
+    async def get_tick(self, instrument: str) -> Tick:
+        if instrument not in self._ticks:
+            raise KeyError(f"No tick data for {instrument}. Call inject_tick() first.")
+        return self._ticks[instrument]
+
+    async def place_order(self, order: Order) -> Order:
+        order.id = order.id or str(uuid.uuid4())
+        now = datetime.now(tz=timezone.utc)
+
+        if order.order_type == OrderType.MARKET:
+            tick = await self.get_tick(order.instrument)
+            fill_price = tick.ask if order.side == OrderSide.BUY else tick.bid
+            order.status = OrderStatus.FILLED
+            order.filled_price = fill_price
+            order.filled_at = now
+            self._update_position(order)
+        else:
+            order.status = OrderStatus.PENDING
+
+        self._orders[order.id] = order
+        return order
+
+    async def cancel_order(self, order_id: str) -> bool:
+        if order_id in self._orders and self._orders[order_id].status == OrderStatus.PENDING:
+            self._orders[order_id].status = OrderStatus.CANCELLED
+            return True
+        return False
+
+    async def get_order(self, order_id: str) -> Order:
+        if order_id not in self._orders:
+            raise KeyError(f"Order {order_id} not found")
+        return self._orders[order_id]
+
+    async def get_open_orders(self) -> list[Order]:
+        return [o for o in self._orders.values() if o.status == OrderStatus.PENDING]
+
+    async def get_positions(self) -> list[Position]:
+        return [p for p in self._positions.values() if p.units > 0]
+
+    async def close_position(self, instrument: str) -> bool:
+        if instrument not in self._positions or self._positions[instrument].units <= 0:
+            return False
+        pos = self._positions[instrument]
+        tick = await self.get_tick(instrument)
+        close_price = tick.bid if pos.side == OrderSide.BUY else tick.ask
+        if pos.side == OrderSide.BUY:
+            pnl = (close_price - pos.avg_price) * pos.units
+        else:
+            pnl = (pos.avg_price - close_price) * pos.units
+        self._balance += pnl
+        pos.realized_pnl += pnl
+        pos.units = 0
+        return True
+
+    async def get_account_balance(self) -> float:
+        return self._balance
+
+    def _update_position(self, order: Order) -> None:
+        assert order.filled_price is not None, "Cannot update position with unfilled order"
+        fill_price = order.filled_price
+
+        if order.instrument not in self._positions:
+            self._positions[order.instrument] = Position(
+                instrument=order.instrument,
+                side=order.side,
+                units=order.units,
+                avg_price=fill_price,
+            )
+            return
+
+        pos = self._positions[order.instrument]
+        if pos.units == 0:
+            pos.side = order.side
+            pos.units = order.units
+            pos.avg_price = fill_price
+        elif pos.side == order.side:
+            total_cost = pos.avg_price * pos.units + fill_price * order.units
+            pos.units += order.units
+            pos.avg_price = total_cost / pos.units
+        else:
+            if pos.side == OrderSide.BUY:
+                pnl = (fill_price - pos.avg_price) * min(order.units, pos.units)
+            else:
+                pnl = (pos.avg_price - fill_price) * min(order.units, pos.units)
+            self._balance += pnl
+            pos.realized_pnl += pnl
+
+            if order.units >= pos.units:
+                remaining = order.units - pos.units
+                pos.side = order.side
+                pos.units = remaining
+                pos.avg_price = fill_price
+            else:
+                pos.units -= order.units

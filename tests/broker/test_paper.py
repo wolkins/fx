@@ -1,0 +1,232 @@
+from datetime import datetime, timezone
+
+import pytest
+
+from fx.broker.base import (
+    BrokerEnvironment,
+    Order,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    Tick,
+)
+from fx.broker.paper import PaperBroker
+
+
+@pytest.fixture
+def broker() -> PaperBroker:
+    b = PaperBroker(initial_balance=1_000_000.0)
+    b.inject_tick(
+        Tick(instrument="USD_JPY", bid=150.00, ask=150.02, timestamp=datetime.now(tz=timezone.utc))
+    )
+    return b
+
+
+async def test_environment(broker: PaperBroker) -> None:
+    assert broker.environment == BrokerEnvironment.PRACTICE
+    assert broker.name == "paper"
+
+
+async def test_capabilities(broker: PaperBroker) -> None:
+    caps = broker.capabilities
+    assert caps.supports_market_order is True
+    assert caps.supports_demo is True
+    assert caps.min_trade_units == 1
+
+
+async def test_connect_disconnect(broker: PaperBroker) -> None:
+    await broker.connect()
+    await broker.disconnect()
+
+
+async def test_async_context_manager(broker: PaperBroker) -> None:
+    async with broker:
+        tick = await broker.get_tick("USD_JPY")
+        assert tick.bid == 150.00
+
+
+async def test_get_tick(broker: PaperBroker) -> None:
+    tick = await broker.get_tick("USD_JPY")
+    assert tick.bid == 150.00
+    assert tick.ask == 150.02
+    assert tick.spread == pytest.approx(0.02)
+
+
+async def test_get_tick_missing(broker: PaperBroker) -> None:
+    with pytest.raises(KeyError):
+        await broker.get_tick("EUR_USD")
+
+
+async def test_market_buy(broker: PaperBroker) -> None:
+    order = Order(
+        id="",
+        instrument="USD_JPY",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        units=1000,
+    )
+    result = await broker.place_order(order)
+    assert result.status == OrderStatus.FILLED
+    assert result.filled_price == 150.02
+    assert result.id != ""
+
+    positions = await broker.get_positions()
+    assert len(positions) == 1
+    assert positions[0].units == 1000
+    assert positions[0].side == OrderSide.BUY
+
+
+async def test_market_sell(broker: PaperBroker) -> None:
+    order = Order(
+        id="",
+        instrument="USD_JPY",
+        side=OrderSide.SELL,
+        order_type=OrderType.MARKET,
+        units=500,
+    )
+    result = await broker.place_order(order)
+    assert result.status == OrderStatus.FILLED
+    assert result.filled_price == 150.00
+
+
+async def test_close_position(broker: PaperBroker) -> None:
+    order = Order(
+        id="",
+        instrument="USD_JPY",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        units=1000,
+    )
+    await broker.place_order(order)
+    closed = await broker.close_position("USD_JPY")
+    assert closed is True
+
+    positions = await broker.get_positions()
+    assert len(positions) == 0
+
+
+async def test_close_nonexistent_position(broker: PaperBroker) -> None:
+    closed = await broker.close_position("EUR_USD")
+    assert closed is False
+
+
+async def test_limit_order_stays_pending(broker: PaperBroker) -> None:
+    order = Order(
+        id="",
+        instrument="USD_JPY",
+        side=OrderSide.BUY,
+        order_type=OrderType.LIMIT,
+        units=1000,
+        price=149.50,
+    )
+    result = await broker.place_order(order)
+    assert result.status == OrderStatus.PENDING
+
+    open_orders = await broker.get_open_orders()
+    assert len(open_orders) == 1
+
+
+async def test_cancel_order(broker: PaperBroker) -> None:
+    order = Order(
+        id="",
+        instrument="USD_JPY",
+        side=OrderSide.BUY,
+        order_type=OrderType.LIMIT,
+        units=1000,
+        price=149.50,
+    )
+    result = await broker.place_order(order)
+    cancelled = await broker.cancel_order(result.id)
+    assert cancelled is True
+
+    open_orders = await broker.get_open_orders()
+    assert len(open_orders) == 0
+
+
+async def test_balance(broker: PaperBroker) -> None:
+    balance = await broker.get_account_balance()
+    assert balance == 1_000_000.0
+
+
+async def test_get_order(broker: PaperBroker) -> None:
+    order = Order(
+        id="",
+        instrument="USD_JPY",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        units=100,
+    )
+    result = await broker.place_order(order)
+    fetched = await broker.get_order(result.id)
+    assert fetched.id == result.id
+
+
+async def test_close_position_updates_balance(broker: PaperBroker) -> None:
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    broker.inject_tick(
+        Tick(instrument="USD_JPY", bid=151.00, ask=151.02, timestamp=datetime.now(tz=timezone.utc))
+    )
+    await broker.close_position("USD_JPY")
+    balance = await broker.get_account_balance()
+    # bought at 150.02, closed at 151.00 bid -> pnl = (151.00 - 150.02) * 1000 = 980
+    assert balance == pytest.approx(1_000_980.0)
+
+
+async def test_opposite_order_partial_close(broker: PaperBroker) -> None:
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.SELL,
+        order_type=OrderType.MARKET, units=400,
+    ))
+    positions = await broker.get_positions()
+    assert len(positions) == 1
+    assert positions[0].units == 600
+    assert positions[0].side == OrderSide.BUY
+
+
+async def test_opposite_order_full_close(broker: PaperBroker) -> None:
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.SELL,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    positions = await broker.get_positions()
+    assert len(positions) == 0
+
+
+async def test_opposite_order_reversal(broker: PaperBroker) -> None:
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.SELL,
+        order_type=OrderType.MARKET, units=1500,
+    ))
+    positions = await broker.get_positions()
+    assert len(positions) == 1
+    assert positions[0].units == 500
+    assert positions[0].side == OrderSide.SELL
+
+
+async def test_opposite_order_pnl(broker: PaperBroker) -> None:
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    # bought at ask=150.02, sell at bid=150.00 -> pnl = (150.00 - 150.02) * 1000 = -20
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.SELL,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    balance = await broker.get_account_balance()
+    assert balance == pytest.approx(1_000_000.0 - 20.0)
