@@ -36,6 +36,7 @@ class BrokerCapabilities:
     supports_streaming_price: bool = False
     supports_market_order: bool = False
     supports_limit_order: bool = False
+    supports_stop_order: bool = False
     supports_stop_loss: bool = False
     supports_take_profit: bool = False
     supports_position_close: bool = False
@@ -60,6 +61,8 @@ class Tick:
 
 @dataclass
 class Order:
+    """id is an application-level identifier. Use broker_order_id for the broker's own order ID."""
+
     id: str
     instrument: str
     side: OrderSide
@@ -72,6 +75,9 @@ class Order:
     filled_price: float | None = None
     filled_at: datetime | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    client_order_id: str | None = None
+    client_tag: str | None = None
+    client_comment: str | None = None
     broker_order_id: str | None = None
     create_transaction_id: str | None = None
     fill_transaction_id: str | None = None
@@ -88,6 +94,8 @@ class Position:
     avg_price: float
     unrealized_pnl: float = 0.0
     realized_pnl: float = 0.0
+    stop_loss: float | None = None
+    take_profit: float | None = None
     broker_data: dict[str, Any] = field(default_factory=dict)
 
 

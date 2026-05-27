@@ -69,6 +69,10 @@ class SafetyGuard(BrokerAdapter):
             raise OrderValidationError(
                 f"{self._broker.name} does not support limit orders."
             )
+        if order.order_type == OrderType.STOP and not caps.supports_stop_order:
+            raise OrderValidationError(
+                f"{self._broker.name} does not support stop orders."
+            )
 
         if self._broker.environment == BrokerEnvironment.LIVE:
             if not caps.supports_stop_loss:

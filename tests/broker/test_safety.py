@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import pytest
 
 from fx.broker.base import (
+    BrokerCapabilities,
     BrokerEnvironment,
     Order,
     OrderSide,
@@ -49,6 +50,7 @@ def _make_order(
     take_profit: float | None = None,
     units: int = 1000,
     order_type: OrderType = OrderType.MARKET,
+    price: float | None = None,
 ) -> Order:
     return Order(
         id="",
@@ -58,6 +60,7 @@ def _make_order(
         units=units,
         stop_loss=stop_loss,
         take_profit=take_profit,
+        price=price,
     )
 
 
@@ -105,25 +108,16 @@ async def test_live_close_position_blocked(live_guard_disabled: SafetyGuard) -> 
 
 async def test_live_market_no_sl_rejected(live_guard_enabled: SafetyGuard) -> None:
     with pytest.raises(OrderValidationError, match="stop_loss"):
-        await live_guard_enabled.place_order(
-            _make_order(take_profit=151.0)
-        )
+        await live_guard_enabled.place_order(_make_order(take_profit=151.0))
 
 
 async def test_live_market_no_tp_rejected(live_guard_enabled: SafetyGuard) -> None:
     with pytest.raises(OrderValidationError, match="take_profit"):
-        await live_guard_enabled.place_order(
-            _make_order(stop_loss=149.0)
-        )
+        await live_guard_enabled.place_order(_make_order(stop_loss=149.0))
 
 
 async def test_live_limit_no_sl_allowed(live_guard_enabled: SafetyGuard) -> None:
-    # Limit orders don't require SL/TP at the SafetyGuard level
-    # (will fail at OANDA because not connected, but validation passes)
-    order = _make_order(order_type=OrderType.LIMIT)
-    order.price = 149.50
-    # No LiveTradingDisabledError or OrderValidationError should be raised
-    # The actual call will fail with RuntimeError("Not connected") which is expected
+    order = _make_order(order_type=OrderType.LIMIT, price=149.50)
     with pytest.raises(RuntimeError, match="Not connected"):
         await live_guard_enabled.place_order(order)
 
@@ -139,6 +133,37 @@ async def test_zero_units_rejected(paper_guard: SafetyGuard) -> None:
 async def test_negative_units_rejected(paper_guard: SafetyGuard) -> None:
     with pytest.raises(OrderValidationError, match="units"):
         await paper_guard.place_order(_make_order(units=-100))
+
+
+# --- stop order capability ---
+
+
+def test_stop_order_capability_check() -> None:
+    no_stop_caps = BrokerCapabilities(
+        supports_market_order=True,
+        supports_stop_order=False,
+        supports_stop_loss=True,
+        supports_take_profit=True,
+    )
+    broker = PaperBroker()
+    guard = SafetyGuard(broker)
+
+    class PatchedBroker(PaperBroker):
+        @property
+        def capabilities(self) -> BrokerCapabilities:
+            return no_stop_caps
+
+    patched = PatchedBroker()
+    patched_guard = SafetyGuard(patched)
+    with pytest.raises(OrderValidationError, match="stop orders"):
+        patched_guard._validate_order(
+            _make_order(order_type=OrderType.STOP, price=151.0)
+        )
+
+    # Normal paper broker supports stop orders
+    guard._validate_order(
+        _make_order(order_type=OrderType.STOP, price=151.0)
+    )
 
 
 # --- delegate read operations ---
@@ -162,3 +187,4 @@ async def test_guard_properties(paper_guard: SafetyGuard) -> None:
     assert paper_guard.name == "paper"
     assert paper_guard.environment == BrokerEnvironment.PRACTICE
     assert paper_guard.capabilities.supports_market_order is True
+    assert paper_guard.capabilities.supports_stop_order is True

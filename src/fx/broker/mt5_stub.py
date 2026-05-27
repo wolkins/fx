@@ -38,6 +38,7 @@ class MT5Adapter(BrokerAdapter):
             supports_streaming_price=True,
             supports_market_order=True,
             supports_limit_order=True,
+            supports_stop_order=True,
             supports_stop_loss=True,
             supports_take_profit=True,
             supports_position_close=True,

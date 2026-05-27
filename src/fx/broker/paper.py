@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from fx.broker.base import (
@@ -14,6 +15,16 @@ from fx.broker.base import (
     Position,
     Tick,
 )
+
+
+@dataclass
+class TradeClose:
+    instrument: str
+    side: OrderSide
+    units: int
+    close_price: float
+    pnl: float
+    reason: str
 
 
 class PaperBroker(BrokerAdapter):
@@ -40,6 +51,7 @@ class PaperBroker(BrokerAdapter):
             supports_streaming_price=False,
             supports_market_order=True,
             supports_limit_order=True,
+            supports_stop_order=True,
             supports_stop_loss=True,
             supports_take_profit=True,
             supports_position_close=True,
@@ -120,9 +132,17 @@ class PaperBroker(BrokerAdapter):
     async def get_account_balance(self) -> float:
         return self._balance
 
-    def process_tick(self, tick: Tick) -> list[Order]:
-        """Evaluate pending orders against the new tick and fill any that trigger."""
+    def process_tick(self, tick: Tick) -> tuple[list[Order], list[TradeClose]]:
+        """Evaluate pending orders and SL/TP against the new tick.
+
+        Returns (filled_orders, trade_closes).
+        """
         self._ticks[tick.instrument] = tick
+        filled = self._process_pending_orders(tick)
+        closes = self._process_sl_tp(tick)
+        return filled, closes
+
+    def _process_pending_orders(self, tick: Tick) -> list[Order]:
         filled: list[Order] = []
         for order in list(self._orders.values()):
             if order.status != OrderStatus.PENDING:
@@ -153,6 +173,49 @@ class PaperBroker(BrokerAdapter):
                 filled.append(order)
         return filled
 
+    def _process_sl_tp(self, tick: Tick) -> list[TradeClose]:
+        closes: list[TradeClose] = []
+        for pos in list(self._positions.values()):
+            if pos.units <= 0 or pos.instrument != tick.instrument:
+                continue
+
+            close_price: float | None = None
+            reason = ""
+
+            if pos.side == OrderSide.BUY:
+                if pos.stop_loss is not None and tick.bid <= pos.stop_loss:
+                    close_price = tick.bid
+                    reason = "stop_loss"
+                elif pos.take_profit is not None and tick.bid >= pos.take_profit:
+                    close_price = tick.bid
+                    reason = "take_profit"
+            else:
+                if pos.stop_loss is not None and tick.ask >= pos.stop_loss:
+                    close_price = tick.ask
+                    reason = "stop_loss"
+                elif pos.take_profit is not None and tick.ask <= pos.take_profit:
+                    close_price = tick.ask
+                    reason = "take_profit"
+
+            if close_price is not None:
+                if pos.side == OrderSide.BUY:
+                    pnl = (close_price - pos.avg_price) * pos.units
+                else:
+                    pnl = (pos.avg_price - close_price) * pos.units
+                closes.append(TradeClose(
+                    instrument=pos.instrument,
+                    side=pos.side,
+                    units=pos.units,
+                    close_price=close_price,
+                    pnl=pnl,
+                    reason=reason,
+                ))
+                self._balance += pnl
+                pos.realized_pnl += pnl
+                pos.units = 0
+
+        return closes
+
     def _update_position(self, order: Order) -> None:
         assert order.filled_price is not None, "Cannot update position with unfilled order"
         fill_price = order.filled_price
@@ -163,6 +226,8 @@ class PaperBroker(BrokerAdapter):
                 side=order.side,
                 units=order.units,
                 avg_price=fill_price,
+                stop_loss=order.stop_loss,
+                take_profit=order.take_profit,
             )
             return
 
@@ -171,10 +236,16 @@ class PaperBroker(BrokerAdapter):
             pos.side = order.side
             pos.units = order.units
             pos.avg_price = fill_price
+            pos.stop_loss = order.stop_loss
+            pos.take_profit = order.take_profit
         elif pos.side == order.side:
             total_cost = pos.avg_price * pos.units + fill_price * order.units
             pos.units += order.units
             pos.avg_price = total_cost / pos.units
+            if order.stop_loss is not None:
+                pos.stop_loss = order.stop_loss
+            if order.take_profit is not None:
+                pos.take_profit = order.take_profit
         else:
             if pos.side == OrderSide.BUY:
                 pnl = (fill_price - pos.avg_price) * min(order.units, pos.units)
@@ -188,5 +259,7 @@ class PaperBroker(BrokerAdapter):
                 pos.side = order.side
                 pos.units = remaining
                 pos.avg_price = fill_price
+                pos.stop_loss = order.stop_loss
+                pos.take_profit = order.take_profit
             else:
                 pos.units -= order.units

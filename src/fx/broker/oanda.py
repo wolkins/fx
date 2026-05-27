@@ -58,6 +58,7 @@ class OandaAdapter(BrokerAdapter):
             supports_streaming_price=True,
             supports_market_order=True,
             supports_limit_order=True,
+            supports_stop_order=True,
             supports_stop_loss=True,
             supports_take_profit=True,
             supports_position_close=True,
@@ -159,26 +160,56 @@ class OandaAdapter(BrokerAdapter):
         if order.take_profit is not None:
             body["order"]["takeProfitOnFill"] = {"price": str(order.take_profit)}
 
-        data = await self._request(
-            "POST",
-            f"/v3/accounts/{self._account_id}/orders",
-            json=body,
-        )
+        client_ext: dict[str, str] = {}
+        if order.client_order_id is not None:
+            client_ext["id"] = order.client_order_id
+        if order.client_tag is not None:
+            client_ext["tag"] = order.client_tag
+        if order.client_comment is not None:
+            client_ext["comment"] = order.client_comment
+        if client_ext:
+            body["order"]["clientExtensions"] = client_ext
 
+        try:
+            data = await self._request(
+                "POST",
+                f"/v3/accounts/{self._account_id}/orders",
+                json=body,
+            )
+        except OandaError as e:
+            self._extract_reject_from_error(order, e.body)
+            raise
+
+        self._store_meta(order, data)
+        self._parse_transactions(order, data)
+        return order
+
+    def _store_meta(self, order: Order, data: dict[str, Any]) -> None:
         order.broker_data["lastTransactionID"] = data.get("lastTransactionID")
         order.broker_data["relatedTransactionIDs"] = data.get("relatedTransactionIDs")
+        if "orderReissueTransaction" in data:
+            order.broker_data["orderReissueTransaction"] = data["orderReissueTransaction"]
+        if "orderReissueRejectTransaction" in data:
+            order.broker_data["orderReissueRejectTransaction"] = data[
+                "orderReissueRejectTransaction"
+            ]
+
+    def _parse_transactions(self, order: Order, data: dict[str, Any]) -> None:
         handled = False
 
         if "orderCreateTransaction" in data:
             create_txn = data["orderCreateTransaction"]
             order.create_transaction_id = str(create_txn["id"])
-            order.broker_order_id = str(create_txn.get("id"))
+            order.broker_order_id = str(create_txn["id"])
+            if order.client_order_id and "clientExtensions" in create_txn:
+                order.broker_data["clientExtensions"] = create_txn["clientExtensions"]
             handled = True
 
         if "orderFillTransaction" in data:
             fill = data["orderFillTransaction"]
             order.status = OrderStatus.FILLED
             order.fill_transaction_id = str(fill["id"])
+            order.broker_order_id = str(fill.get("orderID", order.broker_order_id or fill["id"]))
             order.filled_price = float(fill["price"])
             order.filled_at = datetime.fromisoformat(fill["time"].replace("Z", "+00:00"))
             if not order.id:
@@ -193,16 +224,10 @@ class OandaAdapter(BrokerAdapter):
                 order.id = str(cancel_txn["id"])
             handled = True
         elif "orderRejectTransaction" in data:
-            reject_txn = data["orderRejectTransaction"]
-            order.status = OrderStatus.REJECTED
-            order.reject_transaction_id = str(reject_txn["id"])
-            order.broker_data["reject_reason"] = reject_txn.get("rejectReason")
-            if not order.id:
-                order.id = str(reject_txn["id"])
+            self._apply_reject(order, data["orderRejectTransaction"])
             handled = True
 
         if "orderCreateTransaction" in data and order.status == OrderStatus.PENDING:
-            order.status = OrderStatus.PENDING
             if not order.id:
                 order.id = order.create_transaction_id or ""
             handled = True
@@ -214,7 +239,23 @@ class OandaAdapter(BrokerAdapter):
                 500, {"message": "Unknown OANDA order response", "data": data}
             )
 
-        return order
+    @staticmethod
+    def _apply_reject(order: Order, reject_txn: dict[str, Any]) -> None:
+        order.status = OrderStatus.REJECTED
+        order.reject_transaction_id = str(reject_txn["id"])
+        order.broker_data["reject_reason"] = reject_txn.get("rejectReason")
+
+    @staticmethod
+    def _extract_reject_from_error(order: Order, body: dict[str, Any]) -> None:
+        order.broker_data["lastTransactionID"] = body.get("lastTransactionID")
+        order.broker_data["relatedTransactionIDs"] = body.get("relatedTransactionIDs")
+        order.broker_data["errorCode"] = body.get("errorCode")
+        order.broker_data["errorMessage"] = body.get("errorMessage")
+        if "orderRejectTransaction" in body:
+            reject_txn = body["orderRejectTransaction"]
+            order.status = OrderStatus.REJECTED
+            order.reject_transaction_id = str(reject_txn["id"])
+            order.broker_data["reject_reason"] = reject_txn.get("rejectReason")
 
     async def cancel_order(self, order_id: str) -> bool:
         try:
@@ -316,6 +357,7 @@ class OandaAdapter(BrokerAdapter):
             created_at = datetime.fromisoformat(create_time.replace("Z", "+00:00"))
         else:
             created_at = datetime.now(tz=timezone.utc)
+        client_ext = raw.get("clientExtensions", {})
         return Order(
             id=str(raw["id"]),
             instrument=raw["instrument"],
@@ -325,6 +367,9 @@ class OandaAdapter(BrokerAdapter):
             status=OrderStatus.PENDING,
             price=float(raw["price"]) if "price" in raw else None,
             created_at=created_at,
+            client_order_id=client_ext.get("id"),
+            client_tag=client_ext.get("tag"),
+            client_comment=client_ext.get("comment"),
             broker_order_id=str(raw["id"]),
             broker_data=raw,
         )
