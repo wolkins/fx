@@ -32,8 +32,10 @@ class RiskManager:
     ) -> RiskDecision:
         self._logger.log_order_submitted(order, strategy_id=strategy_id)
 
+        risk_state = self._build_risk_state(positions, account_balance, daily_pnl)
+
         if order.intent in (OrderIntent.CLOSE, OrderIntent.REDUCE):
-            self._logger.log_risk_accepted(order, strategy_id=strategy_id)
+            self._logger.log_risk_bypassed(order, strategy_id=strategy_id)
             return RiskDecision(allowed=True, severity="info")
 
         checks: list[RiskDecision] = [
@@ -46,24 +48,21 @@ class RiskManager:
         for decision in checks:
             if not decision.allowed:
                 self._log_rejection(
-                    order, decision, positions, account_balance, daily_pnl, strategy_id
+                    order, decision, risk_state, strategy_id
                 )
                 return decision
 
         self._record_order(order)
-        self._logger.log_risk_accepted(order, strategy_id=strategy_id)
+        self._logger.log_risk_accepted(order, strategy_id=strategy_id, risk_state=risk_state)
         return RiskDecision(allowed=True)
 
-    def _log_rejection(
+    def _build_risk_state(
         self,
-        order: Order,
-        decision: RiskDecision,
         positions: list[Position],
         account_balance: float,
         daily_pnl: float,
-        strategy_id: str | None,
-    ) -> None:
-        risk_state: dict[str, Any] = {
+    ) -> dict[str, Any]:
+        return {
             "account_balance": account_balance,
             "daily_pnl": daily_pnl,
             "open_positions": len([p for p in positions if p.units > 0]),
@@ -74,6 +73,14 @@ class RiskManager:
                 "max_daily_loss_amount": self._config.max_daily_loss_amount,
             },
         }
+
+    def _log_rejection(
+        self,
+        order: Order,
+        decision: RiskDecision,
+        risk_state: dict[str, Any],
+        strategy_id: str | None,
+    ) -> None:
         self._logger.log_risk_rejected(
             order,
             reason_code=decision.code or "UNKNOWN",

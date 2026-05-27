@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Any
 
 from fx.audit.events import AuditEvent, AuditEventType
 from fx.broker.base import Order, OrderStatus
+
+_logger = logging.getLogger(__name__)
 
 
 class AuditLogWriteError(Exception):
@@ -35,7 +38,16 @@ class TradeLogger(ABC):
             payload=self._order_payload(order),
         ))
 
-    def log_risk_accepted(self, order: Order, *, strategy_id: str | None = None) -> None:
+    def log_risk_accepted(
+        self,
+        order: Order,
+        *,
+        strategy_id: str | None = None,
+        risk_state: dict[str, Any] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {"order": self._order_payload(order)}
+        if risk_state:
+            payload["risk_state"] = risk_state
         self.log(AuditEvent(
             event_type=AuditEventType.ORDER_ACCEPTED_BY_RISK,
             instrument=order.instrument,
@@ -44,6 +56,7 @@ class TradeLogger(ABC):
             order_type=order.order_type.value,
             client_order_id=order.client_order_id,
             strategy_id=strategy_id,
+            payload=payload,
         ))
 
     def log_risk_rejected(
@@ -71,6 +84,24 @@ class TradeLogger(ABC):
             payload=payload,
         ))
 
+    def log_risk_bypassed(self, order: Order, *, strategy_id: str | None = None) -> None:
+        from fx.broker.base import OrderIntent
+        event_type = (
+            AuditEventType.RISK_BYPASSED_FOR_CLOSE
+            if order.intent == OrderIntent.CLOSE
+            else AuditEventType.RISK_BYPASSED_FOR_REDUCE
+        )
+        self.log(AuditEvent(
+            event_type=event_type,
+            instrument=order.instrument,
+            side=order.side.value,
+            units=order.units,
+            order_type=order.order_type.value,
+            client_order_id=order.client_order_id,
+            strategy_id=strategy_id,
+            payload=self._order_payload(order),
+        ))
+
     def log_sent_to_broker(self, order: Order) -> None:
         self.log(AuditEvent(
             event_type=AuditEventType.ORDER_SENT_TO_BROKER,
@@ -80,6 +111,7 @@ class TradeLogger(ABC):
             order_type=order.order_type.value,
             client_order_id=order.client_order_id,
             broker_order_id=order.broker_order_id,
+            payload=self._order_payload(order),
         ))
 
     def log_order_result(self, order: Order) -> None:
@@ -111,6 +143,7 @@ class TradeLogger(ABC):
                 message=order.broker_data.get("errorMessage"),
                 payload={
                     "reject_transaction_id": order.reject_transaction_id,
+                    "broker_data": order.broker_data,
                 },
             ))
         elif order.status == OrderStatus.CANCELLED:
@@ -222,9 +255,9 @@ class JSONLinesTradeLogger(TradeLogger):
         self._fsync = fsync
         self._fail_on_error = fail_on_error
         self._events: list[AuditEvent] = []
+        self._path.parent.mkdir(parents=True, exist_ok=True)
 
     def log(self, event: AuditEvent) -> None:
-        self._events.append(event)
         try:
             with self._path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
@@ -234,6 +267,9 @@ class JSONLinesTradeLogger(TradeLogger):
         except OSError as e:
             if self._fail_on_error:
                 raise AuditLogWriteError(f"Failed to write audit log: {e}") from e
+            _logger.warning("Failed to write audit log: %s", e)
+            return
+        self._events.append(event)
 
     def get_events(
         self, event_type: AuditEventType | None = None

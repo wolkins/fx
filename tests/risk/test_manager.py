@@ -135,6 +135,8 @@ def test_close_order_allowed_despite_daily_loss(logger: InMemoryTradeLogger) -> 
     order = _make_order(intent=OrderIntent.CLOSE)
     decision = mgr.evaluate(order, [], 1_000_000.0, daily_pnl=-25_000.0)
     assert decision.allowed is True
+    bypassed = logger.get_events(AuditEventType.RISK_BYPASSED_FOR_CLOSE)
+    assert len(bypassed) == 1
 
 
 def test_reduce_order_allowed_despite_daily_loss(logger: InMemoryTradeLogger) -> None:
@@ -142,6 +144,8 @@ def test_reduce_order_allowed_despite_daily_loss(logger: InMemoryTradeLogger) ->
     order = _make_order(intent=OrderIntent.REDUCE)
     decision = mgr.evaluate(order, [], 1_000_000.0, daily_pnl=-25_000.0)
     assert decision.allowed is True
+    bypassed = logger.get_events(AuditEventType.RISK_BYPASSED_FOR_REDUCE)
+    assert len(bypassed) == 1
 
 
 def test_open_order_blocked_when_daily_loss_exceeded(logger: InMemoryTradeLogger) -> None:
@@ -247,6 +251,17 @@ def test_risk_decision_has_severity_and_created_at(logger: InMemoryTradeLogger) 
     decision = mgr.evaluate(_make_order(), [], 1_000_000.0)
     assert decision.severity == "info"
     assert decision.created_at is not None
+
+
+def test_accepted_log_includes_risk_state(logger: InMemoryTradeLogger) -> None:
+    mgr = RiskManager(RiskConfig(), logger)
+    mgr.evaluate(_make_order(), [_make_position("EUR_USD")], 1_000_000.0, daily_pnl=-5_000.0)
+    accepted = logger.get_events(AuditEventType.ORDER_ACCEPTED_BY_RISK)
+    assert len(accepted) == 1
+    payload = accepted[0].payload
+    assert "risk_state" in payload
+    assert payload["risk_state"]["account_balance"] == 1_000_000.0
+    assert payload["risk_state"]["open_positions"] == 1
 
 
 def test_rejection_log_includes_risk_state(logger: InMemoryTradeLogger) -> None:
