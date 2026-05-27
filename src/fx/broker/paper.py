@@ -175,6 +175,63 @@ class PaperBroker(BrokerAdapter):
                 filled.append(order)
         return filled
 
+    def process_ohlc_sl_tp(
+        self, instrument: str, high: float, low: float, close: float, spread: float
+    ) -> list[TradeClose]:
+        """OHLC-based SL/TP check. SL is prioritized when both hit in same candle."""
+        closes: list[TradeClose] = []
+        for pos in list(self._positions.values()):
+            if pos.units <= 0 or pos.instrument != instrument:
+                continue
+
+            sl_hit = False
+            tp_hit = False
+            if pos.side == OrderSide.BUY:
+                if pos.stop_loss is not None and low <= pos.stop_loss:
+                    sl_hit = True
+                if pos.take_profit is not None and high >= pos.take_profit:
+                    tp_hit = True
+            else:
+                if pos.stop_loss is not None and high >= pos.stop_loss:
+                    sl_hit = True
+                if pos.take_profit is not None and low <= pos.take_profit:
+                    tp_hit = True
+
+            if sl_hit:
+                close_price = pos.stop_loss or 0.0
+                reason = "stop_loss"
+            elif tp_hit:
+                close_price = pos.take_profit or 0.0
+                reason = "take_profit"
+            else:
+                continue
+
+            if pos.side == OrderSide.BUY:
+                pnl = (close_price - pos.avg_price) * pos.units
+            else:
+                pnl = (pos.avg_price - close_price) * pos.units
+            closes.append(TradeClose(
+                instrument=pos.instrument,
+                side=pos.side,
+                units=pos.units,
+                close_price=close_price,
+                pnl=pnl,
+                reason=reason,
+                entry_price=pos.avg_price,
+            ))
+            self._balance += pnl
+            pos.realized_pnl += pnl
+            pos.units = 0
+
+            half = spread / 2
+            self._ticks[instrument] = Tick(
+                instrument=instrument,
+                bid=close - half,
+                ask=close + half,
+                timestamp=datetime.now(tz=timezone.utc),
+            )
+        return closes
+
     def _process_sl_tp(self, tick: Tick) -> list[TradeClose]:
         closes: list[TradeClose] = []
         for pos in list(self._positions.values()):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime as dt
+
 from fx.audit.logger import InMemoryTradeLogger
 from fx.backtest.data import BacktestCandle
 from fx.backtest.metrics import (
@@ -26,12 +28,14 @@ class BacktestEngine:
         risk_config: RiskConfig | None = None,
         spread: float = 0.02,
         close_on_finish: bool = True,
+        sl_tp_mode: str = "close_only",
     ) -> None:
         self._strategy = strategy
         self._initial_balance = initial_balance
         self._risk_config = risk_config or RiskConfig()
         self._spread = spread
         self._close_on_finish = close_on_finish
+        self._sl_tp_mode = sl_tp_mode
 
     async def run(self, candles: list[BacktestCandle]) -> BacktestResult:
         broker = PaperBroker(initial_balance=self._initial_balance)
@@ -44,17 +48,33 @@ class BacktestEngine:
         equity_curve: list[float] = []
         prices: list[float] = []
         daily_pnl = 0.0
+        current_date: dt.date | None = None
 
         for candle in candles:
+            candle_date = candle.timestamp.date()
+            if current_date is not None and candle_date != current_date:
+                daily_pnl = 0.0
+            current_date = candle_date
+
             prices.append(candle.close)
-
             tick = self._candle_to_tick(candle)
-            filled_orders, trade_closes = broker.process_tick(tick)
 
-            for tc in trade_closes:
-                trades.append(self._to_backtest_trade(tc, self._strategy.strategy_id))
-                daily_pnl += tc.pnl
-                self._log_trade_close(logger, tc)
+            if self._sl_tp_mode == "ohlc_conservative":
+                ohlc_closes = broker.process_ohlc_sl_tp(
+                    candle.instrument, candle.high, candle.low, candle.close, self._spread
+                )
+                for tc in ohlc_closes:
+                    trades.append(self._to_backtest_trade(tc, self._strategy.strategy_id))
+                    daily_pnl += tc.pnl
+                    self._log_trade_close(logger, tc)
+                broker.inject_tick(tick)
+                filled_orders, _ = broker.process_tick(tick)
+            else:
+                filled_orders, tick_closes = broker.process_tick(tick)
+                for tc in tick_closes:
+                    trades.append(self._to_backtest_trade(tc, self._strategy.strategy_id))
+                    daily_pnl += tc.pnl
+                    self._log_trade_close(logger, tc)
 
             signal = self._strategy.on_bar(list(prices))
 
