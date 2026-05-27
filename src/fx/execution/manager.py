@@ -4,6 +4,7 @@ from fx.audit.events import AuditEvent, AuditEventType
 from fx.audit.logger import TradeLogger
 from fx.broker.base import Order, OrderIntent, OrderSide, OrderType, Position
 from fx.execution.executor import OrderExecutor
+from fx.execution.result import ExecutionResult
 from fx.risk.manager import RiskManager
 from fx.signal.model import Signal, SignalAction
 
@@ -30,7 +31,7 @@ class TradeManager:
         positions: list[Position],
         account_balance: float,
         daily_pnl: float = 0.0,
-    ) -> list[Order]:
+    ) -> list[ExecutionResult]:
         if signal.action == SignalAction.HOLD:
             self._logger.log(AuditEvent(
                 event_type=AuditEventType.SIGNAL_HOLD,
@@ -66,7 +67,7 @@ class TradeManager:
             },
         ))
 
-        results: list[Order] = []
+        results: list[ExecutionResult] = []
         for order in orders:
             decision = self._risk.evaluate(
                 order, positions, account_balance, daily_pnl,
@@ -74,8 +75,8 @@ class TradeManager:
             )
             if not decision.allowed:
                 continue
-            result = await self._executor.execute(order)
-            results.append(result)
+            exec_result = await self._executor.execute(order)
+            results.append(exec_result)
         return results
 
     def _build_orders(self, signal: Signal, positions: list[Position]) -> list[Order]:

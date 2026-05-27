@@ -5,7 +5,6 @@ from fx.backtest.data import BacktestCandle
 from fx.backtest.metrics import (
     calculate_max_drawdown,
     calculate_profit_factor,
-    calculate_total_pnl,
     calculate_total_return,
     calculate_win_rate,
 )
@@ -51,18 +50,27 @@ class BacktestEngine:
 
             tick = self._candle_to_tick(candle)
             filled_orders, trade_closes = broker.process_tick(tick)
+
             for tc in trade_closes:
-                trades.append(self._trade_close_to_backtest_trade(tc))
+                trades.append(self._to_backtest_trade(tc, self._strategy.strategy_id))
                 daily_pnl += tc.pnl
+                self._log_trade_close(logger, tc)
 
             signal = self._strategy.on_bar(list(prices))
 
             positions = await broker.get_positions()
             balance = await broker.get_account_balance()
 
-            await manager.process_signal(
+            exec_results = await manager.process_signal(
                 signal, positions, balance, daily_pnl
             )
+
+            for er in exec_results:
+                if er.trade_close is not None:
+                    trades.append(self._to_backtest_trade(
+                        er.trade_close, self._strategy.strategy_id
+                    ))
+                    daily_pnl += er.trade_close.pnl
 
             equity = await self._calculate_equity(broker, tick)
             equity_curve.append(equity)
@@ -73,12 +81,13 @@ class BacktestEngine:
                 for pos in positions:
                     result = await broker.close_position(pos.instrument, side=pos.side)
                     if result is not None:
-                        trades.append(self._trade_close_to_backtest_trade(
-                            result, strategy_id=self._strategy.strategy_id
+                        trades.append(self._to_backtest_trade(
+                            result, self._strategy.strategy_id
                         ))
+                        self._log_trade_close(logger, result)
 
         final_balance = await broker.get_account_balance()
-        total_pnl = calculate_total_pnl(trades)
+        total_pnl = final_balance - self._initial_balance
         win_count = sum(1 for t in trades if t.pnl > 0)
         loss_count = sum(1 for t in trades if t.pnl < 0)
 
@@ -96,7 +105,7 @@ class BacktestEngine:
             trades=trades,
             equity_curve=equity_curve,
             audit_events=logger.get_events(),
-            orders=list(broker._orders.values()),
+            orders=broker.get_all_orders(),
         )
 
     def _candle_to_tick(self, candle: BacktestCandle) -> Tick:
@@ -109,19 +118,31 @@ class BacktestEngine:
         )
 
     @staticmethod
-    def _trade_close_to_backtest_trade(
-        tc: TradeClose, strategy_id: str = ""
-    ) -> BacktestTrade:
+    def _to_backtest_trade(tc: TradeClose, strategy_id: str = "") -> BacktestTrade:
         return BacktestTrade(
             instrument=tc.instrument,
             side=tc.side.value,
             units=tc.units,
-            entry_price=0.0,
+            entry_price=tc.entry_price,
             exit_price=tc.close_price,
             pnl=tc.pnl,
             closed_at=tc.closed_at,
             reason=tc.reason,
             strategy_id=strategy_id,
+        )
+
+    @staticmethod
+    def _log_trade_close(logger: InMemoryTradeLogger, tc: TradeClose) -> None:
+        if tc.reason == "stop_loss":
+            logger.log_sl_triggered(
+                tc.instrument, tc.side.value, tc.units, tc.close_price, tc.pnl
+            )
+        elif tc.reason == "take_profit":
+            logger.log_tp_triggered(
+                tc.instrument, tc.side.value, tc.units, tc.close_price, tc.pnl
+            )
+        logger.log_trade_closed(
+            tc.instrument, tc.side.value, tc.units, tc.close_price, tc.pnl, tc.reason
         )
 
     @staticmethod

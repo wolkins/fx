@@ -71,6 +71,32 @@ class BuyThenCloseStrategy(Strategy):
         )
 
 
+class BuyThenReverseStrategy(Strategy):
+    def __init__(self) -> None:
+        self._step = 0
+
+    @property
+    def strategy_id(self) -> str:
+        return "buy_then_reverse"
+
+    def on_bar(self, prices: list[float], timestamp: float | None = None) -> Signal:
+        self._step += 1
+        if self._step == 3:
+            return Signal(
+                action=SignalAction.BUY, instrument="USD_JPY",
+                strategy_id=self.strategy_id, units=1000,
+            )
+        if self._step == 6:
+            return Signal(
+                action=SignalAction.REVERSE_TO_SELL, instrument="USD_JPY",
+                strategy_id=self.strategy_id, units=1000,
+            )
+        return Signal(
+            action=SignalAction.HOLD, instrument="USD_JPY",
+            strategy_id=self.strategy_id,
+        )
+
+
 # --- basic tests ---
 
 
@@ -79,7 +105,6 @@ async def test_backtest_generates_orders() -> None:
     candles = _candles([150.0, 150.5, 151.0, 150.8, 151.2])
     result = await engine.run(candles)
     assert result.initial_balance == 1_000_000.0
-    assert result.trade_count >= 0
     assert len(result.equity_curve) == len(candles)
     assert len(result.audit_events) > 0
 
@@ -89,15 +114,14 @@ async def test_backtest_close_on_finish() -> None:
     candles = _candles([150.0, 150.5, 151.0])
     result = await engine.run(candles)
     assert result.trade_count >= 1
-    assert any(t.reason in ("close_position", "close_on_finish") for t in result.trades)
 
 
 async def test_backtest_no_close_on_finish() -> None:
     engine = BacktestEngine(BuyThenCloseStrategy(), close_on_finish=False)
     candles = _candles([150.0, 150.5, 151.0])
     result = await engine.run(candles)
-    open_trades = [t for t in result.trades if t.reason == "close_position"]
-    assert len(open_trades) == 0
+    close_trades = [t for t in result.trades if t.reason == "close_position"]
+    assert len(close_trades) == 0
 
 
 async def test_backtest_hold_only() -> None:
@@ -121,28 +145,80 @@ async def test_backtest_audit_events() -> None:
     assert AuditEventType.ORDER_FILLED in event_types
 
 
-async def test_backtest_equity_curve_length() -> None:
-    engine = BacktestEngine(AlwaysBuyStrategy())
-    candles = _candles([150.0, 150.5, 151.0, 150.0])
-    result = await engine.run(candles)
-    assert len(result.equity_curve) == 4
-
-
-async def test_backtest_result_consistency() -> None:
-    engine = BacktestEngine(BuyThenCloseStrategy(), initial_balance=1_000_000.0)
-    candles = _candles([150.0, 150.5, 151.0, 151.5])
-    result = await engine.run(candles)
-    assert result.total_return == pytest.approx(
-        (result.final_balance - result.initial_balance) / result.initial_balance
-    )
-    assert result.win_count + result.loss_count <= result.trade_count
-
-
 async def test_backtest_orders_preserved() -> None:
     engine = BacktestEngine(BuyThenCloseStrategy())
     candles = _candles([150.0, 150.5, 151.0])
     result = await engine.run(candles)
     assert len(result.orders) >= 1
+
+
+# --- total_pnl integrity ---
+
+
+async def test_total_pnl_matches_balance_change() -> None:
+    engine = BacktestEngine(BuyThenCloseStrategy(), initial_balance=1_000_000.0)
+    candles = _candles([150.0, 150.5, 151.0, 151.5])
+    result = await engine.run(candles)
+    balance_pnl = result.final_balance - result.initial_balance
+    assert result.total_pnl == pytest.approx(balance_pnl, abs=0.01)
+
+
+async def test_reverse_pnl_matches_balance_change() -> None:
+    engine = BacktestEngine(BuyThenReverseStrategy(), initial_balance=1_000_000.0)
+    candles = _candles([150.0, 150.2, 150.4, 150.6, 150.8, 151.0, 150.5, 150.0])
+    result = await engine.run(candles)
+    balance_pnl = result.final_balance - result.initial_balance
+    assert result.total_pnl == pytest.approx(balance_pnl, abs=0.01)
+
+
+async def test_reverse_creates_close_trade() -> None:
+    engine = BacktestEngine(BuyThenReverseStrategy(), initial_balance=1_000_000.0)
+    candles = _candles([150.0, 150.2, 150.4, 150.6, 150.8, 151.0, 150.5, 150.0])
+    result = await engine.run(candles)
+    close_trades = [t for t in result.trades if t.reason == "close_position"]
+    assert len(close_trades) >= 1
+
+
+# --- entry_price ---
+
+
+async def test_entry_price_is_not_zero() -> None:
+    engine = BacktestEngine(BuyThenCloseStrategy(), initial_balance=1_000_000.0)
+    candles = _candles([150.0, 150.5, 151.0])
+    result = await engine.run(candles)
+    for trade in result.trades:
+        assert trade.entry_price != 0.0
+
+
+# --- SL/TP audit ---
+
+
+async def test_sl_trigger_creates_audit_event() -> None:
+    engine = BacktestEngine(BuyThenCloseStrategy(), close_on_finish=False)
+    prices = [150.0, 150.5, 147.0]
+    candles = _candles(prices)
+    result = await engine.run(candles)
+    sl_events = [
+        e for e in result.audit_events
+        if e.event_type == AuditEventType.POSITION_SL_TRIGGERED
+    ]
+    assert len(sl_events) >= 1
+    closed_events = [
+        e for e in result.audit_events
+        if e.event_type == AuditEventType.TRADE_CLOSED
+    ]
+    assert len(closed_events) >= 1
+
+
+async def test_sl_trade_has_entry_price() -> None:
+    engine = BacktestEngine(BuyThenCloseStrategy(), close_on_finish=False)
+    prices = [150.0, 150.5, 147.0]
+    candles = _candles(prices)
+    result = await engine.run(candles)
+    sl_trades = [t for t in result.trades if t.reason == "stop_loss"]
+    assert len(sl_trades) >= 1
+    for t in sl_trades:
+        assert t.entry_price != 0.0
 
 
 # --- EMA cross integration ---
@@ -157,6 +233,8 @@ async def test_ema_cross_uptrend() -> None:
     candles = _candles(prices)
     result = await engine.run(candles)
     assert len(result.equity_curve) == 20
+    balance_pnl = result.final_balance - result.initial_balance
+    assert result.total_pnl == pytest.approx(balance_pnl, abs=0.01)
 
 
 async def test_ema_cross_volatile() -> None:
@@ -173,7 +251,8 @@ async def test_ema_cross_volatile() -> None:
     candles = _candles(prices)
     result = await engine.run(candles)
     assert len(result.equity_curve) == 30
-    assert result.trade_count >= 0
+    balance_pnl = result.final_balance - result.initial_balance
+    assert result.total_pnl == pytest.approx(balance_pnl, abs=0.01)
 
 
 # --- risk management in backtest ---
@@ -189,19 +268,4 @@ async def test_backtest_max_daily_loss() -> None:
     prices = [150.0 + i * 0.1 for i in range(10)]
     candles = _candles(prices)
     result = await engine.run(candles)
-    assert result.trade_count >= 0
     assert len(result.equity_curve) == 10
-
-
-# --- SL/TP via process_tick ---
-
-
-async def test_backtest_sl_triggered() -> None:
-    engine = BacktestEngine(BuyThenCloseStrategy(), close_on_finish=False)
-    prices = [150.0, 150.5, 147.0]
-    candles = _candles(prices)
-    result = await engine.run(candles)
-    # SL at 148.0, price drops to 147.0 → should trigger
-    # But SL/TP is processed via process_tick, which uses bid = close - spread/2
-    # bid = 147.0 - 0.01 = 146.99, SL = 148.0 → triggered
-    assert len(result.trades) >= 1

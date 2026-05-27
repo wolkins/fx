@@ -3,6 +3,7 @@ from __future__ import annotations
 from fx.audit.events import AuditEvent, AuditEventType
 from fx.audit.logger import TradeLogger
 from fx.broker.base import BrokerAdapter, Order, OrderIntent, OrderStatus
+from fx.execution.result import ExecutionResult
 
 
 class OrderExecutionError(Exception):
@@ -27,7 +28,7 @@ class OrderExecutor:
         self._logger = logger
         self._raise_on_error = raise_on_error
 
-    async def execute(self, order: Order) -> Order:
+    async def execute(self, order: Order) -> ExecutionResult:
         self._logger.log_sent_to_broker(order)
 
         if order.intent == OrderIntent.CLOSE:
@@ -38,7 +39,7 @@ class OrderExecutor:
 
         return await self._execute_place(order)
 
-    async def _execute_place(self, order: Order) -> Order:
+    async def _execute_place(self, order: Order) -> ExecutionResult:
         try:
             result = await self._broker.place_order(order)
         except Exception as e:
@@ -56,13 +57,13 @@ class OrderExecutor:
                 ))
             if self._raise_on_error:
                 raise OrderExecutionError(str(e)) from e
-            return order
+            return ExecutionResult(order=order)
         self._logger.log_order_result(result)
-        return result
+        return ExecutionResult(order=result)
 
-    async def _execute_close(self, order: Order) -> Order:
+    async def _execute_close(self, order: Order) -> ExecutionResult:
         try:
-            result = await self._broker.close_position(order.instrument, side=order.side)
+            trade_close = await self._broker.close_position(order.instrument, side=order.side)
         except Exception as e:
             self._logger.log(AuditEvent(
                 event_type=AuditEventType.ORDER_FAILED,
@@ -76,19 +77,20 @@ class OrderExecutor:
             if self._raise_on_error:
                 raise OrderExecutionError(str(e)) from e
             order.status = OrderStatus.REJECTED
-            return order
+            return ExecutionResult(order=order)
 
-        if result is not None:
+        if trade_close is not None:
             order.status = OrderStatus.FILLED
-            order.filled_price = result.close_price
+            order.filled_price = trade_close.close_price
             self._logger.log_trade_closed(
-                instrument=result.instrument,
-                side=result.side.value,
-                units=result.units,
-                close_price=result.close_price,
-                pnl=result.pnl,
-                reason=result.reason,
+                instrument=trade_close.instrument,
+                side=trade_close.side.value,
+                units=trade_close.units,
+                close_price=trade_close.close_price,
+                pnl=trade_close.pnl,
+                reason=trade_close.reason,
             )
+            return ExecutionResult(order=order, trade_close=trade_close)
         else:
             order.status = OrderStatus.CANCELLED
             self._logger.log(AuditEvent(
@@ -99,9 +101,9 @@ class OrderExecutor:
                 client_order_id=order.client_order_id,
                 reason_code="no_position_to_close",
             ))
-        return order
+            return ExecutionResult(order=order)
 
-    async def _execute_reduce(self, order: Order) -> Order:
+    async def _execute_reduce(self, order: Order) -> ExecutionResult:
         self._logger.log(AuditEvent(
             event_type=AuditEventType.ORDER_FAILED,
             instrument=order.instrument,
@@ -115,4 +117,4 @@ class OrderExecutor:
         order.status = OrderStatus.REJECTED
         if self._raise_on_error:
             raise ReduceNotSupportedError("REDUCE intent is not yet supported")
-        return order
+        return ExecutionResult(order=order)

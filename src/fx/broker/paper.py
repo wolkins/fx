@@ -121,6 +121,7 @@ class PaperBroker(BrokerAdapter):
             close_price=close_price,
             pnl=pnl,
             reason="close_position",
+            entry_price=pos.avg_price,
         )
         self._balance += pnl
         pos.realized_pnl += pnl
@@ -129,6 +130,9 @@ class PaperBroker(BrokerAdapter):
 
     async def get_account_balance(self) -> float:
         return self._balance
+
+    def get_all_orders(self) -> list[Order]:
+        return list(self._orders.values())
 
     def process_tick(self, tick: Tick) -> tuple[list[Order], list[TradeClose]]:
         """Evaluate pending orders and SL/TP against the new tick.
@@ -207,6 +211,7 @@ class PaperBroker(BrokerAdapter):
                     close_price=close_price,
                     pnl=pnl,
                     reason=reason,
+                    entry_price=pos.avg_price,
                 ))
                 self._balance += pnl
                 pos.realized_pnl += pnl

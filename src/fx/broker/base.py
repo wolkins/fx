@@ -114,6 +114,7 @@ class TradeClose:
     close_price: float
     pnl: float
     reason: str
+    entry_price: float = 0.0
     closed_at: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
     broker_data: dict[str, Any] = field(default_factory=dict)
 
