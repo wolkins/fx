@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 from fx.audit.logger import TradeLogger
-from fx.broker.base import Order, Position
+from fx.broker.base import Order, OrderIntent, Position
 from fx.risk.config import RiskConfig
 from fx.risk.decision import RiskDecision
 
@@ -31,6 +32,10 @@ class RiskManager:
     ) -> RiskDecision:
         self._logger.log_order_submitted(order, strategy_id=strategy_id)
 
+        if order.intent in (OrderIntent.CLOSE, OrderIntent.REDUCE):
+            self._logger.log_risk_accepted(order, strategy_id=strategy_id)
+            return RiskDecision(allowed=True, severity="info")
+
         checks: list[RiskDecision] = [
             self._check_position_size(order),
             self._check_open_positions(order, positions),
@@ -40,11 +45,8 @@ class RiskManager:
 
         for decision in checks:
             if not decision.allowed:
-                self._logger.log_risk_rejected(
-                    order,
-                    reason_code=decision.code or "UNKNOWN",
-                    message=decision.reason or "Risk check failed",
-                    strategy_id=strategy_id,
+                self._log_rejection(
+                    order, decision, positions, account_balance, daily_pnl, strategy_id
                 )
                 return decision
 
@@ -52,11 +54,40 @@ class RiskManager:
         self._logger.log_risk_accepted(order, strategy_id=strategy_id)
         return RiskDecision(allowed=True)
 
+    def _log_rejection(
+        self,
+        order: Order,
+        decision: RiskDecision,
+        positions: list[Position],
+        account_balance: float,
+        daily_pnl: float,
+        strategy_id: str | None,
+    ) -> None:
+        risk_state: dict[str, Any] = {
+            "account_balance": account_balance,
+            "daily_pnl": daily_pnl,
+            "open_positions": len([p for p in positions if p.units > 0]),
+            "config": {
+                "max_position_size": self._config.max_position_size,
+                "max_open_positions": self._config.max_open_positions,
+                "max_daily_loss_ratio": self._config.max_daily_loss_ratio,
+                "max_daily_loss_amount": self._config.max_daily_loss_amount,
+            },
+        }
+        self._logger.log_risk_rejected(
+            order,
+            reason_code=decision.code or "UNKNOWN",
+            message=decision.reason or "Risk check failed",
+            strategy_id=strategy_id,
+            risk_state=risk_state,
+        )
+
     def _check_position_size(self, order: Order) -> RiskDecision:
         if order.units > self._config.max_position_size:
             return RiskDecision(
                 allowed=False,
                 code="MAX_POSITION_SIZE_EXCEEDED",
+                severity="warning",
                 reason=f"Order size {order.units} exceeds max {self._config.max_position_size}",
                 details={
                     "order_units": order.units,
@@ -74,6 +105,7 @@ class RiskManager:
             return RiskDecision(
                 allowed=False,
                 code="MAX_OPEN_POSITIONS_EXCEEDED",
+                severity="warning",
                 reason=f"Open positions {len(open_positions)} >= max {self._config.max_open_positions}",
                 details={
                     "open_positions": len(open_positions),
@@ -89,18 +121,28 @@ class RiskManager:
             return RiskDecision(
                 allowed=False,
                 code="ZERO_BALANCE",
+                severity="critical",
                 reason="Account balance is zero or negative",
             )
-        loss_ratio = abs(min(daily_pnl, 0.0)) / account_balance
-        if loss_ratio >= self._config.max_daily_loss:
+
+        if self._config.max_daily_loss_amount is not None:
+            loss_limit = self._config.max_daily_loss_amount
+        else:
+            loss_limit = account_balance * self._config.max_daily_loss_ratio
+
+        actual_loss = abs(min(daily_pnl, 0.0))
+        if actual_loss >= loss_limit:
             return RiskDecision(
                 allowed=False,
                 code="MAX_DAILY_LOSS_EXCEEDED",
-                reason=f"Daily loss {loss_ratio:.4f} >= max {self._config.max_daily_loss}",
+                severity="critical",
+                reason=f"Daily loss {actual_loss:.2f} >= limit {loss_limit:.2f}",
                 details={
                     "daily_pnl": daily_pnl,
-                    "loss_ratio": loss_ratio,
-                    "max_daily_loss": self._config.max_daily_loss,
+                    "actual_loss": actual_loss,
+                    "loss_limit": loss_limit,
+                    "max_daily_loss_ratio": self._config.max_daily_loss_ratio,
+                    "max_daily_loss_amount": self._config.max_daily_loss_amount,
                 },
             )
         return RiskDecision(allowed=True)
@@ -117,6 +159,7 @@ class RiskManager:
                 return RiskDecision(
                     allowed=False,
                     code="DUPLICATE_ORDER",
+                    severity="warning",
                     reason=f"Duplicate order within {self._config.duplicate_window_seconds}s",
                     details={"order_key": order_key},
                 )
@@ -128,4 +171,12 @@ class RiskManager:
 
     @staticmethod
     def _make_order_key(order: Order) -> str:
-        return f"{order.instrument}:{order.side.value}:{order.order_type.value}:{order.units}"
+        parts = [
+            order.instrument,
+            order.side.value,
+            order.order_type.value,
+            str(order.units),
+        ]
+        if order.client_order_id:
+            parts.append(order.client_order_id)
+        return ":".join(parts)

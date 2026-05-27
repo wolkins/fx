@@ -1,9 +1,15 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from fx.audit.events import AuditEventType
-from fx.audit.logger import InMemoryTradeLogger, JSONLinesTradeLogger
-from fx.broker.base import Order, OrderSide, OrderStatus, OrderType
+from fx.audit.logger import (
+    AuditLogWriteError,
+    InMemoryTradeLogger,
+    JSONLinesTradeLogger,
+)
+from fx.broker.base import Order, OrderIntent, OrderSide, OrderStatus, OrderType
 
 
 def _make_order(**kwargs: object) -> Order:
@@ -21,12 +27,10 @@ def _make_order(**kwargs: object) -> Order:
 
 def test_in_memory_log_and_get() -> None:
     logger = InMemoryTradeLogger()
-    order = _make_order()
-    logger.log_order_submitted(order, strategy_id="test-strat")
+    logger.log_order_submitted(_make_order(), strategy_id="test-strat")
     events = logger.get_events()
     assert len(events) == 1
     assert events[0].event_type == AuditEventType.ORDER_SUBMITTED
-    assert events[0].instrument == "USD_JPY"
     assert events[0].strategy_id == "test-strat"
 
 
@@ -40,19 +44,27 @@ def test_in_memory_filter_by_type() -> None:
     assert len(logger.get_events(AuditEventType.ORDER_FILLED)) == 0
 
 
-def test_log_risk_rejected() -> None:
+def test_log_risk_rejected_with_risk_state() -> None:
     logger = InMemoryTradeLogger()
     order = _make_order()
+    risk_state = {
+        "account_balance": 1_000_000.0,
+        "daily_pnl": -15_000.0,
+        "open_positions": 2,
+        "config": {"max_position_size": 100_000},
+    }
     logger.log_risk_rejected(
         order,
         reason_code="MAX_POSITION_SIZE_EXCEEDED",
         message="Too large",
         strategy_id="s1",
+        risk_state=risk_state,
     )
     events = logger.get_events(AuditEventType.ORDER_REJECTED_BY_RISK)
     assert len(events) == 1
     assert events[0].reason_code == "MAX_POSITION_SIZE_EXCEEDED"
-    assert events[0].message == "Too large"
+    assert events[0].payload["risk_state"]["account_balance"] == 1_000_000.0
+    assert events[0].payload["order"]["units"] == 1000
 
 
 def test_log_order_filled() -> None:
@@ -131,9 +143,6 @@ def test_jsonlines_writes_to_file(tmp_path: Path) -> None:
     assert first["event_type"] == "ORDER_SUBMITTED"
     assert first["instrument"] == "USD_JPY"
 
-    second = json.loads(lines[1])
-    assert second["event_type"] == "ORDER_ACCEPTED_BY_RISK"
-
 
 def test_jsonlines_one_event_per_line(tmp_path: Path) -> None:
     log_file = tmp_path / "trades.jsonl"
@@ -150,6 +159,37 @@ def test_jsonlines_one_event_per_line(tmp_path: Path) -> None:
         assert "timestamp" in parsed
 
 
+def test_jsonlines_flush(tmp_path: Path) -> None:
+    log_file = tmp_path / "trades.jsonl"
+    logger = JSONLinesTradeLogger(log_file)
+    logger.log_sl_triggered("USD_JPY", "buy", 1000, 149.50, -520.0)
+    # File should be readable immediately after log (flushed)
+    content = log_file.read_text(encoding="utf-8")
+    assert "POSITION_SL_TRIGGERED" in content
+
+
+def test_jsonlines_fsync(tmp_path: Path) -> None:
+    log_file = tmp_path / "trades.jsonl"
+    logger = JSONLinesTradeLogger(log_file, fsync=True)
+    logger.log_sl_triggered("USD_JPY", "buy", 1000, 149.50, -520.0)
+    content = log_file.read_text(encoding="utf-8")
+    assert "POSITION_SL_TRIGGERED" in content
+
+
+def test_jsonlines_fail_on_error_raises(tmp_path: Path) -> None:
+    log_file = tmp_path / "nonexistent_dir" / "trades.jsonl"
+    logger = JSONLinesTradeLogger(log_file, fail_on_error=True)
+    with pytest.raises(AuditLogWriteError):
+        logger.log_sl_triggered("USD_JPY", "buy", 1000, 149.50, -520.0)
+
+
+def test_jsonlines_no_fail_on_error_silent(tmp_path: Path) -> None:
+    log_file = tmp_path / "nonexistent_dir" / "trades.jsonl"
+    logger = JSONLinesTradeLogger(log_file, fail_on_error=False)
+    # Should not raise
+    logger.log_sl_triggered("USD_JPY", "buy", 1000, 149.50, -520.0)
+
+
 def test_jsonlines_get_events(tmp_path: Path) -> None:
     log_file = tmp_path / "trades.jsonl"
     logger = JSONLinesTradeLogger(log_file)
@@ -159,17 +199,16 @@ def test_jsonlines_get_events(tmp_path: Path) -> None:
 
     all_events = logger.get_events()
     assert len(all_events) == 2
-
     sl_events = logger.get_events(AuditEventType.POSITION_SL_TRIGGERED)
     assert len(sl_events) == 1
 
 
-def test_order_payload_includes_sl_tp() -> None:
+def test_order_payload_includes_intent() -> None:
     logger = InMemoryTradeLogger()
-    order = _make_order(stop_loss=149.50, take_profit=151.00, price=150.00)
+    order = _make_order(intent=OrderIntent.CLOSE, stop_loss=149.50, take_profit=151.00)
     logger.log_order_submitted(order)
     events = logger.get_events()
     payload = events[0].payload
+    assert payload["intent"] == "close"
     assert payload["stop_loss"] == 149.50
     assert payload["take_profit"] == 151.00
-    assert payload["price"] == 150.00

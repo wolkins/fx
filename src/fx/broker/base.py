@@ -30,6 +30,12 @@ class OrderStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class OrderIntent(str, Enum):
+    OPEN = "open"
+    CLOSE = "close"
+    REDUCE = "reduce"
+
+
 @dataclass(frozen=True)
 class BrokerCapabilities:
     supports_rest_api: bool = False
@@ -68,6 +74,7 @@ class Order:
     side: OrderSide
     order_type: OrderType
     units: int
+    intent: OrderIntent = OrderIntent.OPEN
     status: OrderStatus = OrderStatus.PENDING
     price: float | None = None
     stop_loss: float | None = None
