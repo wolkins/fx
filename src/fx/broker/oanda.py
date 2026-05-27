@@ -15,6 +15,7 @@ from fx.broker.base import (
     OrderType,
     Position,
     Tick,
+    TradeClose,
 )
 
 OANDA_HOSTS = {
@@ -312,7 +313,7 @@ class OandaAdapter(BrokerAdapter):
 
     async def close_position(
         self, instrument: str, side: OrderSide | None = None
-    ) -> bool:
+    ) -> TradeClose | None:
         body: dict[str, str] = {}
         if side == OrderSide.BUY:
             body["longUnits"] = "ALL"
@@ -322,14 +323,22 @@ class OandaAdapter(BrokerAdapter):
             body["longUnits"] = "ALL"
             body["shortUnits"] = "ALL"
         try:
-            await self._request(
+            data = await self._request(
                 "PUT",
                 f"/v3/accounts/{self._account_id}/positions/{instrument}/close",
                 json=body,
             )
-            return True
+            return TradeClose(
+                instrument=instrument,
+                side=side or OrderSide.BUY,
+                units=0,
+                close_price=0.0,
+                pnl=0.0,
+                reason="close_position",
+                broker_data=data,
+            )
         except OandaError:
-            return False
+            return None
 
     async def get_account_balance(self) -> float:
         data = await self._request(

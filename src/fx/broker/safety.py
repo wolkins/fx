@@ -10,6 +10,7 @@ from fx.broker.base import (
     OrderType,
     Position,
     Tick,
+    TradeClose,
 )
 
 
@@ -128,7 +129,7 @@ class SafetyGuard(BrokerAdapter):
 
     async def close_position(
         self, instrument: str, side: OrderSide | None = None
-    ) -> bool:
+    ) -> TradeClose | None:
         self._check_write_allowed()
         return await self._broker.close_position(instrument, side)
 

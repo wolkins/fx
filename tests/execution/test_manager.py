@@ -89,7 +89,11 @@ async def test_reverse_to_buy_with_real_position(
     assert final_positions[0].side == OrderSide.BUY
     assert final_positions[0].units == 1000
     assert len(logger.get_events(AuditEventType.REVERSE_SPLIT)) == 1
-    assert len(logger.get_events(AuditEventType.TRADE_CLOSED)) == 1
+    closed_events = logger.get_events(AuditEventType.TRADE_CLOSED)
+    assert len(closed_events) == 1
+    assert closed_events[0].payload["close_price"] == 150.02
+    # SELL at 150.00, close at ask 150.02 → pnl = (150.00 - 150.02) * 500 = -10
+    assert closed_events[0].payload["pnl"] == pytest.approx(-10.0)
 
 
 async def test_reverse_to_sell_with_real_position(

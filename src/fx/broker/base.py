@@ -106,6 +106,18 @@ class Position:
     broker_data: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class TradeClose:
+    instrument: str
+    side: OrderSide
+    units: int
+    close_price: float
+    pnl: float
+    reason: str
+    closed_at: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    broker_data: dict[str, Any] = field(default_factory=dict)
+
+
 class BrokerAdapter(ABC):
     """All broker integrations implement this interface."""
 
@@ -148,7 +160,7 @@ class BrokerAdapter(ABC):
     @abstractmethod
     async def close_position(
         self, instrument: str, side: OrderSide | None = None
-    ) -> bool: ...
+    ) -> TradeClose | None: ...
 
     @abstractmethod
     async def get_account_balance(self) -> float: ...

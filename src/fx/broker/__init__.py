@@ -9,6 +9,7 @@ from fx.broker.base import (
     OrderType,
     Position,
     Tick,
+    TradeClose,
 )
 from fx.broker.factory import create_broker
 from fx.broker.safety import LiveTradingDisabledError, OrderValidationError, SafetyGuard
@@ -27,5 +28,6 @@ __all__ = [
     "Position",
     "SafetyGuard",
     "Tick",
+    "TradeClose",
     "create_broker",
 ]

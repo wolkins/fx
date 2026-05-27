@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from fx.broker.base import (
@@ -14,17 +13,8 @@ from fx.broker.base import (
     OrderType,
     Position,
     Tick,
+    TradeClose,
 )
-
-
-@dataclass
-class TradeClose:
-    instrument: str
-    side: OrderSide
-    units: int
-    close_price: float
-    pnl: float
-    reason: str
 
 
 class PaperBroker(BrokerAdapter):
@@ -55,7 +45,7 @@ class PaperBroker(BrokerAdapter):
             supports_stop_loss=True,
             supports_take_profit=True,
             supports_position_close=True,
-            supports_reverse_order=True,
+            supports_reverse_order=False,
             supports_demo=True,
             min_trade_units=1,
             max_leverage=25,
@@ -112,22 +102,30 @@ class PaperBroker(BrokerAdapter):
 
     async def close_position(
         self, instrument: str, side: OrderSide | None = None
-    ) -> bool:
+    ) -> TradeClose | None:
         if instrument not in self._positions or self._positions[instrument].units <= 0:
-            return False
+            return None
         pos = self._positions[instrument]
         if side is not None and pos.side != side:
-            return False
+            return None
         tick = await self.get_tick(instrument)
         close_price = tick.bid if pos.side == OrderSide.BUY else tick.ask
         if pos.side == OrderSide.BUY:
             pnl = (close_price - pos.avg_price) * pos.units
         else:
             pnl = (pos.avg_price - close_price) * pos.units
+        result = TradeClose(
+            instrument=instrument,
+            side=pos.side,
+            units=pos.units,
+            close_price=close_price,
+            pnl=pnl,
+            reason="close_position",
+        )
         self._balance += pnl
         pos.realized_pnl += pnl
         pos.units = 0
-        return True
+        return result
 
     async def get_account_balance(self) -> float:
         return self._balance

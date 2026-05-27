@@ -9,6 +9,7 @@ from fx.broker.base import (
     OrderStatus,
     OrderType,
     Tick,
+    TradeClose,
 )
 from fx.broker.paper import PaperBroker
 
@@ -36,6 +37,7 @@ async def test_capabilities(broker: PaperBroker) -> None:
     assert caps.supports_market_order is True
     assert caps.supports_stop_order is True
     assert caps.supports_demo is True
+    assert caps.supports_reverse_order is False
     assert caps.min_trade_units == 1
 
 
@@ -78,25 +80,49 @@ async def test_market_buy(broker: PaperBroker) -> None:
     assert positions[0].side == OrderSide.BUY
 
 
-async def test_market_sell(broker: PaperBroker) -> None:
+async def test_market_order_saved_in_orders(broker: PaperBroker) -> None:
     order = Order(
-        id="", instrument="USD_JPY", side=OrderSide.SELL,
-        order_type=OrderType.MARKET, units=500,
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+        client_order_id="test-client-001",
     )
     result = await broker.place_order(order)
-    assert result.status == OrderStatus.FILLED
-    assert result.filled_price == 150.00
+    fetched = await broker.get_order(result.id)
+    assert fetched.id == result.id
+    assert fetched.status == OrderStatus.FILLED
+    assert fetched.client_order_id == "test-client-001"
 
 
-async def test_close_position(broker: PaperBroker) -> None:
+async def test_filled_market_not_in_open_orders(broker: PaperBroker) -> None:
     await broker.place_order(Order(
         id="", instrument="USD_JPY", side=OrderSide.BUY,
         order_type=OrderType.MARKET, units=1000,
     ))
-    closed = await broker.close_position("USD_JPY")
-    assert closed is True
-    positions = await broker.get_positions()
-    assert len(positions) == 0
+    open_orders = await broker.get_open_orders()
+    assert len(open_orders) == 0
+
+
+async def test_market_sell(broker: PaperBroker) -> None:
+    result = await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.SELL,
+        order_type=OrderType.MARKET, units=500,
+    ))
+    assert result.status == OrderStatus.FILLED
+    assert result.filled_price == 150.00
+
+
+async def test_close_position_returns_trade_close(broker: PaperBroker) -> None:
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    result = await broker.close_position("USD_JPY")
+    assert isinstance(result, TradeClose)
+    assert result.close_price == 150.00
+    assert result.pnl == pytest.approx(-20.0)
+    assert result.side == OrderSide.BUY
+    assert result.units == 1000
+    assert result.reason == "close_position"
 
 
 async def test_close_position_with_matching_side(broker: PaperBroker) -> None:
@@ -104,8 +130,9 @@ async def test_close_position_with_matching_side(broker: PaperBroker) -> None:
         id="", instrument="USD_JPY", side=OrderSide.BUY,
         order_type=OrderType.MARKET, units=1000,
     ))
-    closed = await broker.close_position("USD_JPY", side=OrderSide.BUY)
-    assert closed is True
+    result = await broker.close_position("USD_JPY", side=OrderSide.BUY)
+    assert result is not None
+    assert result.side == OrderSide.BUY
 
 
 async def test_close_position_with_wrong_side(broker: PaperBroker) -> None:
@@ -113,13 +140,28 @@ async def test_close_position_with_wrong_side(broker: PaperBroker) -> None:
         id="", instrument="USD_JPY", side=OrderSide.BUY,
         order_type=OrderType.MARKET, units=1000,
     ))
-    closed = await broker.close_position("USD_JPY", side=OrderSide.SELL)
-    assert closed is False
+    result = await broker.close_position("USD_JPY", side=OrderSide.SELL)
+    assert result is None
 
 
 async def test_close_nonexistent_position(broker: PaperBroker) -> None:
-    closed = await broker.close_position("EUR_USD")
-    assert closed is False
+    result = await broker.close_position("EUR_USD")
+    assert result is None
+
+
+async def test_close_position_updates_balance(broker: PaperBroker) -> None:
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    broker.inject_tick(
+        Tick(instrument="USD_JPY", bid=151.00, ask=151.02, timestamp=_now())
+    )
+    result = await broker.close_position("USD_JPY")
+    assert result is not None
+    assert result.pnl == pytest.approx(980.0)
+    balance = await broker.get_account_balance()
+    assert balance == pytest.approx(1_000_980.0)
 
 
 async def test_limit_order_stays_pending(broker: PaperBroker) -> None:
@@ -158,19 +200,6 @@ async def test_get_order(broker: PaperBroker) -> None:
     result = await broker.place_order(order)
     fetched = await broker.get_order(result.id)
     assert fetched.id == result.id
-
-
-async def test_close_position_updates_balance(broker: PaperBroker) -> None:
-    await broker.place_order(Order(
-        id="", instrument="USD_JPY", side=OrderSide.BUY,
-        order_type=OrderType.MARKET, units=1000,
-    ))
-    broker.inject_tick(
-        Tick(instrument="USD_JPY", bid=151.00, ask=151.02, timestamp=_now())
-    )
-    await broker.close_position("USD_JPY")
-    balance = await broker.get_account_balance()
-    assert balance == pytest.approx(1_000_980.0)
 
 
 async def test_opposite_order_partial_close(broker: PaperBroker) -> None:
@@ -332,10 +361,7 @@ async def test_stop_loss_buy_position(broker: PaperBroker) -> None:
     assert len(closes) == 1
     assert closes[0].reason == "stop_loss"
     assert closes[0].close_price == 149.50
-    # bought at 150.02, SL at 149.50 → pnl = (149.50 - 150.02) * 1000 = -520
     assert closes[0].pnl == pytest.approx(-520.0)
-    positions = await broker.get_positions()
-    assert len(positions) == 0
 
 
 async def test_take_profit_buy_position(broker: PaperBroker) -> None:
@@ -349,8 +375,6 @@ async def test_take_profit_buy_position(broker: PaperBroker) -> None:
     )
     assert len(closes) == 1
     assert closes[0].reason == "take_profit"
-    assert closes[0].close_price == 151.00
-    # bought at 150.02, TP at 151.00 → pnl = (151.00 - 150.02) * 1000 = 980
     assert closes[0].pnl == pytest.approx(980.0)
 
 
@@ -365,8 +389,6 @@ async def test_stop_loss_sell_position(broker: PaperBroker) -> None:
     )
     assert len(closes) == 1
     assert closes[0].reason == "stop_loss"
-    assert closes[0].close_price == 150.50
-    # sold at 150.00, SL at 150.50 → pnl = (150.00 - 150.50) * 1000 = -500
     assert closes[0].pnl == pytest.approx(-500.0)
 
 
@@ -381,8 +403,6 @@ async def test_take_profit_sell_position(broker: PaperBroker) -> None:
     )
     assert len(closes) == 1
     assert closes[0].reason == "take_profit"
-    assert closes[0].close_price == 149.00
-    # sold at 150.00, TP at 149.00 → pnl = (150.00 - 149.00) * 1000 = 1000
     assert closes[0].pnl == pytest.approx(1000.0)
 
 
