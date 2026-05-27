@@ -102,6 +102,15 @@ async def test_filled_market_not_in_open_orders(broker: PaperBroker) -> None:
     assert len(open_orders) == 0
 
 
+async def test_market_order_in_get_all_orders(broker: PaperBroker) -> None:
+    result = await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    all_orders = broker.get_all_orders()
+    assert any(o.id == result.id for o in all_orders)
+
+
 async def test_market_sell(broker: PaperBroker) -> None:
     result = await broker.place_order(Order(
         id="", instrument="USD_JPY", side=OrderSide.SELL,
@@ -120,6 +129,7 @@ async def test_close_position_returns_trade_close(broker: PaperBroker) -> None:
     assert isinstance(result, TradeClose)
     assert result.close_price == 150.00
     assert result.pnl == pytest.approx(-20.0)
+    assert result.closed_at == broker._ticks["USD_JPY"].timestamp
     assert result.side == OrderSide.BUY
     assert result.units == 1000
     assert result.reason == "close_position"

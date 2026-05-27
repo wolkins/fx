@@ -122,6 +122,7 @@ class PaperBroker(BrokerAdapter):
             pnl=pnl,
             reason="close_position",
             entry_price=pos.avg_price,
+            closed_at=tick.timestamp,
         )
         self._balance += pnl
         pos.realized_pnl += pnl
@@ -176,7 +177,13 @@ class PaperBroker(BrokerAdapter):
         return filled
 
     def process_ohlc_sl_tp(
-        self, instrument: str, high: float, low: float, close: float, spread: float
+        self,
+        instrument: str,
+        high: float,
+        low: float,
+        close: float,
+        spread: float,
+        timestamp: datetime | None = None,
     ) -> list[TradeClose]:
         """OHLC-based SL/TP check. SL is prioritized when both hit in same candle."""
         closes: list[TradeClose] = []
@@ -210,6 +217,7 @@ class PaperBroker(BrokerAdapter):
                 pnl = (close_price - pos.avg_price) * pos.units
             else:
                 pnl = (pos.avg_price - close_price) * pos.units
+            ts = timestamp or datetime.now(tz=timezone.utc)
             closes.append(TradeClose(
                 instrument=pos.instrument,
                 side=pos.side,
@@ -218,6 +226,7 @@ class PaperBroker(BrokerAdapter):
                 pnl=pnl,
                 reason=reason,
                 entry_price=pos.avg_price,
+                closed_at=ts,
             ))
             self._balance += pnl
             pos.realized_pnl += pnl
@@ -228,7 +237,7 @@ class PaperBroker(BrokerAdapter):
                 instrument=instrument,
                 bid=close - half,
                 ask=close + half,
-                timestamp=datetime.now(tz=timezone.utc),
+                timestamp=ts,
             )
         return closes
 
@@ -269,6 +278,7 @@ class PaperBroker(BrokerAdapter):
                     pnl=pnl,
                     reason=reason,
                     entry_price=pos.avg_price,
+                    closed_at=tick.timestamp,
                 ))
                 self._balance += pnl
                 pos.realized_pnl += pnl

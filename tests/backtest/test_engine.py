@@ -423,3 +423,55 @@ async def test_backtest_max_daily_loss() -> None:
         AlwaysBuyStrategy(), risk_config=RiskConfig(max_daily_loss_ratio=0.001),
     ).run(_candles([150.0 + i * 0.1 for i in range(10)]))
     assert len(result.equity_curve) == 10
+
+
+# --- sl_tp_mode validation ---
+
+
+def test_invalid_sl_tp_mode() -> None:
+    with pytest.raises(ValueError, match="Invalid sl_tp_mode"):
+        BacktestEngine(AlwaysBuyStrategy(), sl_tp_mode="bad_mode")
+
+
+# --- closed_at timestamp ---
+
+
+async def test_close_only_sl_closed_at_is_candle_time() -> None:
+    start = _ts(5, 10, 0)
+    candles = _ohlc_candles([
+        (150.0, 150.5, 149.5, 150.0),
+        (150.0, 150.5, 149.5, 150.2),
+        (150.2, 150.3, 146.0, 147.0),
+    ], start=start)
+    result = await BacktestEngine(
+        BuyThenCloseStrategy(), close_on_finish=False, sl_tp_mode="close_only"
+    ).run(candles)
+    sl_trades = [t for t in result.trades if t.reason == "stop_loss"]
+    assert len(sl_trades) >= 1
+    assert sl_trades[0].closed_at == start + timedelta(minutes=2)
+
+
+async def test_ohlc_sl_closed_at_is_candle_time() -> None:
+    start = _ts(5, 10, 0)
+    candles = _ohlc_candles([
+        (150.0, 150.5, 149.5, 150.0),
+        (150.0, 150.5, 149.5, 150.2),
+        (150.2, 150.3, 147.5, 149.0),
+    ], start=start)
+    result = await BacktestEngine(
+        BuyThenCloseStrategy(), close_on_finish=False, sl_tp_mode="ohlc_conservative"
+    ).run(candles)
+    sl_trades = [t for t in result.trades if t.reason == "stop_loss"]
+    assert len(sl_trades) >= 1
+    assert sl_trades[0].closed_at == start + timedelta(minutes=2)
+
+
+# --- MARKET orders in BacktestResult.orders ---
+
+
+async def test_market_orders_in_backtest_result() -> None:
+    result = await BacktestEngine(BuyThenCloseStrategy()).run(
+        _candles([150.0, 150.5, 151.0])
+    )
+    filled_orders = [o for o in result.orders if o.filled_price is not None]
+    assert len(filled_orders) >= 1

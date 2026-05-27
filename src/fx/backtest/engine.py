@@ -35,6 +35,11 @@ class BacktestEngine:
         self._risk_config = risk_config or RiskConfig()
         self._spread = spread
         self._close_on_finish = close_on_finish
+        if sl_tp_mode not in ("close_only", "ohlc_conservative"):
+            raise ValueError(
+                f"Invalid sl_tp_mode: {sl_tp_mode!r}. "
+                "Must be 'close_only' or 'ohlc_conservative'."
+            )
         self._sl_tp_mode = sl_tp_mode
 
     async def run(self, candles: list[BacktestCandle]) -> BacktestResult:
@@ -61,7 +66,8 @@ class BacktestEngine:
 
             if self._sl_tp_mode == "ohlc_conservative":
                 ohlc_closes = broker.process_ohlc_sl_tp(
-                    candle.instrument, candle.high, candle.low, candle.close, self._spread
+                    candle.instrument, candle.high, candle.low, candle.close,
+                    self._spread, timestamp=candle.timestamp,
                 )
                 for tc in ohlc_closes:
                     trades.append(self._to_backtest_trade(tc, self._strategy.strategy_id))
