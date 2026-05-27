@@ -29,7 +29,7 @@ class EmaCrossStrategy(Strategy):
                 action=SignalAction.HOLD,
                 instrument=self._instrument,
                 strategy_id=self.strategy_id,
-                metadata={"reason": "insufficient_data"},
+                reason="insufficient_data",
             )
 
         fast_ema = ema(prices, self._fast_period)
@@ -45,14 +45,18 @@ class EmaCrossStrategy(Strategy):
                 action=SignalAction.HOLD,
                 instrument=self._instrument,
                 strategy_id=self.strategy_id,
-                metadata={"reason": "initializing", "fast_ema": fast_now, "slow_ema": slow_now},
+                reason="initializing",
+                metadata={"fast_ema": fast_now, "slow_ema": slow_now},
             )
 
         action = SignalAction.HOLD
+        reason = "no_crossover"
         if fast_above and not self._prev_fast_above:
             action = SignalAction.REVERSE_TO_BUY
+            reason = "golden_cross"
         elif not fast_above and self._prev_fast_above:
             action = SignalAction.REVERSE_TO_SELL
+            reason = "death_cross"
 
         self._prev_fast_above = fast_above
 
@@ -60,6 +64,7 @@ class EmaCrossStrategy(Strategy):
             action=action,
             instrument=self._instrument,
             strategy_id=self.strategy_id,
+            reason=reason,
             units=self._default_units,
             metadata={"fast_ema": fast_now, "slow_ema": slow_now},
         )

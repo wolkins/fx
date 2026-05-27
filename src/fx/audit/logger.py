@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from fx.audit.events import AuditEvent, AuditEventType
+from fx.audit.sanitize import sanitize_broker_data
 from fx.broker.base import Order, OrderStatus
 
 _logger = logging.getLogger(__name__)
@@ -143,7 +144,7 @@ class TradeLogger(ABC):
                 message=order.broker_data.get("errorMessage"),
                 payload={
                     "reject_transaction_id": order.reject_transaction_id,
-                    "broker_data": order.broker_data,
+                    "broker_data": sanitize_broker_data(order.broker_data),
                 },
             ))
         elif order.status == OrderStatus.CANCELLED:

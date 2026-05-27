@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -21,7 +22,9 @@ class Signal:
     action: SignalAction
     instrument: str
     strategy_id: str
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     timestamp: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    reason: str = ""
     confidence: float = 0.0
     stop_loss: float | None = None
     take_profit: float | None = None

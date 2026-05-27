@@ -6,6 +6,7 @@ from fx.broker.base import (
     BrokerCapabilities,
     BrokerEnvironment,
     Order,
+    OrderIntent,
     OrderSide,
     OrderType,
     Tick,
@@ -51,6 +52,8 @@ def _make_order(
     units: int = 1000,
     order_type: OrderType = OrderType.MARKET,
     price: float | None = None,
+    intent: OrderIntent = OrderIntent.OPEN,
+    client_order_id: str | None = None,
 ) -> Order:
     return Order(
         id="",
@@ -61,6 +64,8 @@ def _make_order(
         stop_loss=stop_loss,
         take_profit=take_profit,
         price=price,
+        intent=intent,
+        client_order_id=client_order_id,
     )
 
 
@@ -103,21 +108,50 @@ async def test_live_close_position_blocked(live_guard_disabled: SafetyGuard) -> 
         await live_guard_disabled.close_position("USD_JPY")
 
 
-# --- live enabled but SL/TP required ---
+# --- live OPEN: SL/TP/client_order_id required ---
 
 
-async def test_live_market_no_sl_rejected(live_guard_enabled: SafetyGuard) -> None:
+async def test_live_open_no_sl_rejected(live_guard_enabled: SafetyGuard) -> None:
     with pytest.raises(OrderValidationError, match="stop_loss"):
-        await live_guard_enabled.place_order(_make_order(take_profit=151.0))
+        await live_guard_enabled.place_order(
+            _make_order(take_profit=151.0, client_order_id="test-001")
+        )
 
 
-async def test_live_market_no_tp_rejected(live_guard_enabled: SafetyGuard) -> None:
+async def test_live_open_no_tp_rejected(live_guard_enabled: SafetyGuard) -> None:
     with pytest.raises(OrderValidationError, match="take_profit"):
-        await live_guard_enabled.place_order(_make_order(stop_loss=149.0))
+        await live_guard_enabled.place_order(
+            _make_order(stop_loss=149.0, client_order_id="test-001")
+        )
 
 
-async def test_live_limit_no_sl_allowed(live_guard_enabled: SafetyGuard) -> None:
-    order = _make_order(order_type=OrderType.LIMIT, price=149.50)
+async def test_live_open_no_client_order_id_rejected(live_guard_enabled: SafetyGuard) -> None:
+    with pytest.raises(OrderValidationError, match="client_order_id"):
+        await live_guard_enabled.place_order(
+            _make_order(stop_loss=149.0, take_profit=151.0)
+        )
+
+
+async def test_live_open_limit_also_requires_sl_tp(live_guard_enabled: SafetyGuard) -> None:
+    with pytest.raises(OrderValidationError, match="stop_loss"):
+        await live_guard_enabled.place_order(
+            _make_order(order_type=OrderType.LIMIT, price=149.50, client_order_id="test-001")
+        )
+
+
+# --- live CLOSE/REDUCE: SL/TP/client_order_id NOT required ---
+
+
+async def test_live_close_no_sl_tp_allowed(live_guard_enabled: SafetyGuard) -> None:
+    order = _make_order(intent=OrderIntent.CLOSE)
+    # CLOSE bypasses SL/TP/client_order_id checks
+    # Will fail at broker level (not connected) but SafetyGuard should pass
+    with pytest.raises(RuntimeError, match="Not connected"):
+        await live_guard_enabled.place_order(order)
+
+
+async def test_live_reduce_no_sl_tp_allowed(live_guard_enabled: SafetyGuard) -> None:
+    order = _make_order(intent=OrderIntent.REDUCE)
     with pytest.raises(RuntimeError, match="Not connected"):
         await live_guard_enabled.place_order(order)
 
@@ -145,22 +179,19 @@ def test_stop_order_capability_check() -> None:
         supports_stop_loss=True,
         supports_take_profit=True,
     )
-    broker = PaperBroker()
-    guard = SafetyGuard(broker)
 
     class PatchedBroker(PaperBroker):
         @property
         def capabilities(self) -> BrokerCapabilities:
             return no_stop_caps
 
-    patched = PatchedBroker()
-    patched_guard = SafetyGuard(patched)
+    patched_guard = SafetyGuard(PatchedBroker())
     with pytest.raises(OrderValidationError, match="stop orders"):
         patched_guard._validate_order(
             _make_order(order_type=OrderType.STOP, price=151.0)
         )
 
-    # Normal paper broker supports stop orders
+    guard = SafetyGuard(PaperBroker())
     guard._validate_order(
         _make_order(order_type=OrderType.STOP, price=151.0)
     )
@@ -172,13 +203,10 @@ def test_stop_order_capability_check() -> None:
 async def test_guard_delegates_read_operations(paper_guard: SafetyGuard) -> None:
     tick = await paper_guard.get_tick("USD_JPY")
     assert tick.bid == 150.0
-
     balance = await paper_guard.get_account_balance()
     assert balance == 1_000_000.0
-
     positions = await paper_guard.get_positions()
     assert positions == []
-
     orders = await paper_guard.get_open_orders()
     assert orders == []
 

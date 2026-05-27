@@ -5,6 +5,7 @@ from fx.broker.base import (
     BrokerCapabilities,
     BrokerEnvironment,
     Order,
+    OrderIntent,
     OrderSide,
     OrderType,
     Position,
@@ -74,7 +75,7 @@ class SafetyGuard(BrokerAdapter):
                 f"{self._broker.name} does not support stop orders."
             )
 
-        if self._broker.environment == BrokerEnvironment.LIVE:
+        if self._broker.environment == BrokerEnvironment.LIVE and order.intent == OrderIntent.OPEN:
             if not caps.supports_stop_loss:
                 raise LiveTradingDisabledError(
                     f"{self._broker.name} does not support stop_loss. "
@@ -85,15 +86,18 @@ class SafetyGuard(BrokerAdapter):
                     f"{self._broker.name} does not support take_profit. "
                     "Live trading requires TP capability."
                 )
-            if order.order_type == OrderType.MARKET:
-                if order.stop_loss is None:
-                    raise OrderValidationError(
-                        "Live market order requires stop_loss."
-                    )
-                if order.take_profit is None:
-                    raise OrderValidationError(
-                        "Live market order requires take_profit."
-                    )
+            if order.stop_loss is None:
+                raise OrderValidationError(
+                    "Live OPEN order requires stop_loss."
+                )
+            if order.take_profit is None:
+                raise OrderValidationError(
+                    "Live OPEN order requires take_profit."
+                )
+            if not order.client_order_id:
+                raise OrderValidationError(
+                    "Live OPEN order requires client_order_id."
+                )
 
     async def connect(self) -> None:
         await self._broker.connect()

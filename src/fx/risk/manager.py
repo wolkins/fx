@@ -39,7 +39,7 @@ class RiskManager:
             return RiskDecision(allowed=True, severity="info")
 
         checks: list[RiskDecision] = [
-            self._check_position_size(order),
+            self._check_position_size(order, positions),
             self._check_open_positions(order, positions),
             self._check_daily_loss(daily_pnl, account_balance),
             self._check_duplicate(order),
@@ -89,15 +89,24 @@ class RiskManager:
             risk_state=risk_state,
         )
 
-    def _check_position_size(self, order: Order) -> RiskDecision:
-        if order.units > self._config.max_position_size:
+    def _check_position_size(
+        self, order: Order, positions: list[Position]
+    ) -> RiskDecision:
+        existing_units = sum(
+            p.units for p in positions
+            if p.instrument == order.instrument and p.side == order.side and p.units > 0
+        )
+        projected = existing_units + order.units
+        if projected > self._config.max_position_size:
             return RiskDecision(
                 allowed=False,
                 code="MAX_POSITION_SIZE_EXCEEDED",
                 severity="warning",
-                reason=f"Order size {order.units} exceeds max {self._config.max_position_size}",
+                reason=f"Projected size {projected} exceeds max {self._config.max_position_size}",
                 details={
                     "order_units": order.units,
+                    "existing_units": existing_units,
+                    "projected_units": projected,
                     "max_position_size": self._config.max_position_size,
                 },
             )

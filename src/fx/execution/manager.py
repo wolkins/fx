@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import uuid
-
 from fx.audit.events import AuditEvent, AuditEventType
 from fx.audit.logger import TradeLogger
 from fx.broker.base import Order, OrderIntent, OrderSide, OrderType, Position
@@ -38,7 +36,7 @@ class TradeManager:
                 event_type=AuditEventType.SIGNAL_HOLD,
                 instrument=signal.instrument,
                 strategy_id=signal.strategy_id,
-                payload=signal.metadata,
+                payload={"signal_id": signal.id, "reason": signal.reason, **signal.metadata},
             ))
             return []
 
@@ -47,7 +45,12 @@ class TradeManager:
             instrument=signal.instrument,
             side=self._signal_side(signal),
             strategy_id=signal.strategy_id,
-            payload={"action": signal.action.value, **signal.metadata},
+            payload={
+                "signal_id": signal.id,
+                "action": signal.action.value,
+                "reason": signal.reason,
+                **signal.metadata,
+            },
         ))
 
         orders = self._build_orders(signal, positions)
@@ -56,7 +59,11 @@ class TradeManager:
             event_type=AuditEventType.ORDER_INTENT_CREATED,
             instrument=signal.instrument,
             strategy_id=signal.strategy_id,
-            payload={"order_count": len(orders), "intents": [o.intent.value for o in orders]},
+            payload={
+                "signal_id": signal.id,
+                "order_count": len(orders),
+                "intents": [o.intent.value for o in orders],
+            },
         ))
 
         results: list[Order] = []
@@ -78,17 +85,16 @@ class TradeManager:
             return self._build_reverse_orders(signal, positions, units)
 
         if signal.action in (SignalAction.CLOSE_BUY, SignalAction.CLOSE_SELL):
-            return self._build_close_orders(signal)
+            return self._build_close_orders(signal, positions)
 
         side = OrderSide.BUY if signal.action == SignalAction.BUY else OrderSide.SELL
         return [self._make_order(
-            instrument=signal.instrument,
+            signal=signal,
             side=side,
             units=units,
             intent=OrderIntent.OPEN,
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
-            strategy_id=signal.strategy_id,
         )]
 
     def _build_reverse_orders(
@@ -99,63 +105,72 @@ class TradeManager:
 
         orders: list[Order] = []
 
-        existing = [p for p in positions if p.instrument == signal.instrument and p.side == close_side and p.units > 0]
+        existing = [
+            p for p in positions
+            if p.instrument == signal.instrument and p.side == close_side and p.units > 0
+        ]
         if existing:
             self._logger.log(AuditEvent(
                 event_type=AuditEventType.REVERSE_SPLIT,
                 instrument=signal.instrument,
                 strategy_id=signal.strategy_id,
-                payload={"close_side": close_side.value, "open_side": new_side.value},
+                payload={
+                    "signal_id": signal.id,
+                    "close_side": close_side.value,
+                    "open_side": new_side.value,
+                },
             ))
             orders.append(self._make_order(
-                instrument=signal.instrument,
+                signal=signal,
                 side=close_side,
                 units=existing[0].units,
                 intent=OrderIntent.CLOSE,
-                strategy_id=signal.strategy_id,
             ))
 
         orders.append(self._make_order(
-            instrument=signal.instrument,
+            signal=signal,
             side=new_side,
             units=units,
             intent=OrderIntent.OPEN,
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
-            strategy_id=signal.strategy_id,
         ))
         return orders
 
-    def _build_close_orders(self, signal: Signal) -> list[Order]:
-        side = OrderSide.BUY if signal.action == SignalAction.CLOSE_BUY else OrderSide.SELL
+    def _build_close_orders(self, signal: Signal, positions: list[Position]) -> list[Order]:
+        close_side = OrderSide.BUY if signal.action == SignalAction.CLOSE_BUY else OrderSide.SELL
+        existing = [
+            p for p in positions
+            if p.instrument == signal.instrument and p.side == close_side and p.units > 0
+        ]
+        close_units = existing[0].units if existing else (signal.units or self._default_units)
         return [self._make_order(
-            instrument=signal.instrument,
-            side=side,
-            units=signal.units or self._default_units,
+            signal=signal,
+            side=close_side,
+            units=close_units,
             intent=OrderIntent.CLOSE,
-            strategy_id=signal.strategy_id,
         )]
 
     def _make_order(
         self,
-        instrument: str,
+        signal: Signal,
         side: OrderSide,
         units: int,
         intent: OrderIntent,
-        strategy_id: str,
         stop_loss: float | None = None,
         take_profit: float | None = None,
     ) -> Order:
+        client_order_id = f"{signal.strategy_id}:{signal.id}:{intent.value}:{signal.instrument}"
         return Order(
             id="",
-            instrument=instrument,
+            instrument=signal.instrument,
             side=side,
             order_type=OrderType.MARKET,
             units=units,
             intent=intent,
             stop_loss=stop_loss,
             take_profit=take_profit,
-            client_order_id=f"{strategy_id}-{uuid.uuid4().hex[:8]}",
+            client_order_id=client_order_id,
         )
 
     @staticmethod
