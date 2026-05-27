@@ -126,12 +126,22 @@ class OandaAdapter(BrokerAdapter):
         if not prices:
             raise OandaError(404, {"message": f"No price data for {instrument}"})
         price = prices[0]
-        return Tick(
-            instrument=instrument,
-            bid=float(price["bids"][0]["price"]),
-            ask=float(price["asks"][0]["price"]),
-            timestamp=datetime.fromisoformat(price["time"].replace("Z", "+00:00")),
-        )
+        bids = price.get("bids", [])
+        asks = price.get("asks", [])
+        if not bids:
+            raise OandaError(404, {"message": f"No bid data for {instrument}"})
+        if not asks:
+            raise OandaError(404, {"message": f"No ask data for {instrument}"})
+        time_str = price.get("time")
+        if not time_str:
+            raise OandaError(500, {"message": f"Missing timestamp for {instrument}"})
+        try:
+            bid = float(bids[0]["price"])
+            ask = float(asks[0]["price"])
+            timestamp = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+        except (ValueError, KeyError, TypeError) as e:
+            raise OandaError(500, {"message": f"Invalid price data: {e}"}) from e
+        return Tick(instrument=instrument, bid=bid, ask=ask, timestamp=timestamp)
 
     async def place_order(self, order: Order) -> Order:
         body: dict[str, Any] = {
@@ -155,22 +165,54 @@ class OandaAdapter(BrokerAdapter):
             json=body,
         )
 
+        order.broker_data["lastTransactionID"] = data.get("lastTransactionID")
+        order.broker_data["relatedTransactionIDs"] = data.get("relatedTransactionIDs")
+        handled = False
+
+        if "orderCreateTransaction" in data:
+            create_txn = data["orderCreateTransaction"]
+            order.create_transaction_id = str(create_txn["id"])
+            order.broker_order_id = str(create_txn.get("id"))
+            handled = True
+
         if "orderFillTransaction" in data:
             fill = data["orderFillTransaction"]
             order.status = OrderStatus.FILLED
-            order.id = str(fill["id"])
+            order.fill_transaction_id = str(fill["id"])
             order.filled_price = float(fill["price"])
             order.filled_at = datetime.fromisoformat(fill["time"].replace("Z", "+00:00"))
+            if not order.id:
+                order.id = str(fill["id"])
+            handled = True
         elif "orderCancelTransaction" in data:
+            cancel_txn = data["orderCancelTransaction"]
             order.status = OrderStatus.CANCELLED
-            order.id = str(data["orderCancelTransaction"]["id"])
-            order.broker_data["cancel_reason"] = data["orderCancelTransaction"].get("reason")
-        elif "orderCreateTransaction" in data:
-            order.id = str(data["orderCreateTransaction"]["id"])
-            order.status = OrderStatus.PENDING
+            order.cancel_transaction_id = str(cancel_txn["id"])
+            order.broker_data["cancel_reason"] = cancel_txn.get("reason")
+            if not order.id:
+                order.id = str(cancel_txn["id"])
+            handled = True
         elif "orderRejectTransaction" in data:
+            reject_txn = data["orderRejectTransaction"]
             order.status = OrderStatus.REJECTED
-            order.broker_data["reject_reason"] = data["orderRejectTransaction"].get("rejectReason")
+            order.reject_transaction_id = str(reject_txn["id"])
+            order.broker_data["reject_reason"] = reject_txn.get("rejectReason")
+            if not order.id:
+                order.id = str(reject_txn["id"])
+            handled = True
+
+        if "orderCreateTransaction" in data and order.status == OrderStatus.PENDING:
+            order.status = OrderStatus.PENDING
+            if not order.id:
+                order.id = order.create_transaction_id or ""
+            handled = True
+
+        if not handled:
+            order.status = OrderStatus.REJECTED
+            order.broker_data["unknown_response"] = data
+            raise OandaError(
+                500, {"message": "Unknown OANDA order response", "data": data}
+            )
 
         return order
 
@@ -227,12 +269,22 @@ class OandaAdapter(BrokerAdapter):
                 ))
         return positions
 
-    async def close_position(self, instrument: str) -> bool:
+    async def close_position(
+        self, instrument: str, side: OrderSide | None = None
+    ) -> bool:
+        body: dict[str, str] = {}
+        if side == OrderSide.BUY:
+            body["longUnits"] = "ALL"
+        elif side == OrderSide.SELL:
+            body["shortUnits"] = "ALL"
+        else:
+            body["longUnits"] = "ALL"
+            body["shortUnits"] = "ALL"
         try:
             await self._request(
                 "PUT",
                 f"/v3/accounts/{self._account_id}/positions/{instrument}/close",
-                json={"longUnits": "ALL", "shortUnits": "ALL"},
+                json=body,
             )
             return True
         except OandaError:
@@ -273,5 +325,6 @@ class OandaAdapter(BrokerAdapter):
             status=OrderStatus.PENDING,
             price=float(raw["price"]) if "price" in raw else None,
             created_at=created_at,
+            broker_order_id=str(raw["id"]),
             broker_data=raw,
         )

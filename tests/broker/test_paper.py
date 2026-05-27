@@ -90,19 +90,32 @@ async def test_market_sell(broker: PaperBroker) -> None:
 
 
 async def test_close_position(broker: PaperBroker) -> None:
-    order = Order(
-        id="",
-        instrument="USD_JPY",
-        side=OrderSide.BUY,
-        order_type=OrderType.MARKET,
-        units=1000,
-    )
-    await broker.place_order(order)
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
     closed = await broker.close_position("USD_JPY")
     assert closed is True
-
     positions = await broker.get_positions()
     assert len(positions) == 0
+
+
+async def test_close_position_with_matching_side(broker: PaperBroker) -> None:
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    closed = await broker.close_position("USD_JPY", side=OrderSide.BUY)
+    assert closed is True
+
+
+async def test_close_position_with_wrong_side(broker: PaperBroker) -> None:
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    closed = await broker.close_position("USD_JPY", side=OrderSide.SELL)
+    assert closed is False
 
 
 async def test_close_nonexistent_position(broker: PaperBroker) -> None:
@@ -121,7 +134,6 @@ async def test_limit_order_stays_pending(broker: PaperBroker) -> None:
     )
     result = await broker.place_order(order)
     assert result.status == OrderStatus.PENDING
-
     open_orders = await broker.get_open_orders()
     assert len(open_orders) == 1
 
@@ -138,7 +150,6 @@ async def test_cancel_order(broker: PaperBroker) -> None:
     result = await broker.place_order(order)
     cancelled = await broker.cancel_order(result.id)
     assert cancelled is True
-
     open_orders = await broker.get_open_orders()
     assert len(open_orders) == 0
 
@@ -150,11 +161,8 @@ async def test_balance(broker: PaperBroker) -> None:
 
 async def test_get_order(broker: PaperBroker) -> None:
     order = Order(
-        id="",
-        instrument="USD_JPY",
-        side=OrderSide.BUY,
-        order_type=OrderType.MARKET,
-        units=100,
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=100,
     )
     result = await broker.place_order(order)
     fetched = await broker.get_order(result.id)
@@ -171,7 +179,6 @@ async def test_close_position_updates_balance(broker: PaperBroker) -> None:
     )
     await broker.close_position("USD_JPY")
     balance = await broker.get_account_balance()
-    # bought at 150.02, closed at 151.00 bid -> pnl = (151.00 - 150.02) * 1000 = 980
     assert balance == pytest.approx(1_000_980.0)
 
 
@@ -223,10 +230,96 @@ async def test_opposite_order_pnl(broker: PaperBroker) -> None:
         id="", instrument="USD_JPY", side=OrderSide.BUY,
         order_type=OrderType.MARKET, units=1000,
     ))
-    # bought at ask=150.02, sell at bid=150.00 -> pnl = (150.00 - 150.02) * 1000 = -20
     await broker.place_order(Order(
         id="", instrument="USD_JPY", side=OrderSide.SELL,
         order_type=OrderType.MARKET, units=1000,
     ))
     balance = await broker.get_account_balance()
     assert balance == pytest.approx(1_000_000.0 - 20.0)
+
+
+# --- process_tick tests ---
+
+
+async def test_process_tick_limit_buy_triggers(broker: PaperBroker) -> None:
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.LIMIT, units=1000, price=149.80,
+    ))
+    filled = broker.process_tick(
+        Tick(instrument="USD_JPY", bid=149.78, ask=149.80, timestamp=datetime.now(tz=timezone.utc))
+    )
+    assert len(filled) == 1
+    assert filled[0].status == OrderStatus.FILLED
+    assert filled[0].filled_price == 149.80
+
+
+async def test_process_tick_limit_buy_not_triggered(broker: PaperBroker) -> None:
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.LIMIT, units=1000, price=149.80,
+    ))
+    filled = broker.process_tick(
+        Tick(instrument="USD_JPY", bid=149.90, ask=149.92, timestamp=datetime.now(tz=timezone.utc))
+    )
+    assert len(filled) == 0
+
+
+async def test_process_tick_limit_sell_triggers(broker: PaperBroker) -> None:
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.SELL,
+        order_type=OrderType.LIMIT, units=1000, price=150.50,
+    ))
+    filled = broker.process_tick(
+        Tick(instrument="USD_JPY", bid=150.50, ask=150.52, timestamp=datetime.now(tz=timezone.utc))
+    )
+    assert len(filled) == 1
+    assert filled[0].filled_price == 150.50
+
+
+async def test_process_tick_stop_buy_triggers(broker: PaperBroker) -> None:
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.STOP, units=1000, price=150.50,
+    ))
+    filled = broker.process_tick(
+        Tick(instrument="USD_JPY", bid=150.48, ask=150.50, timestamp=datetime.now(tz=timezone.utc))
+    )
+    assert len(filled) == 1
+    assert filled[0].status == OrderStatus.FILLED
+
+
+async def test_process_tick_stop_sell_triggers(broker: PaperBroker) -> None:
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.SELL,
+        order_type=OrderType.STOP, units=1000, price=149.50,
+    ))
+    filled = broker.process_tick(
+        Tick(instrument="USD_JPY", bid=149.50, ask=149.52, timestamp=datetime.now(tz=timezone.utc))
+    )
+    assert len(filled) == 1
+
+
+async def test_process_tick_updates_position(broker: PaperBroker) -> None:
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.LIMIT, units=500, price=149.80,
+    ))
+    broker.process_tick(
+        Tick(instrument="USD_JPY", bid=149.78, ask=149.80, timestamp=datetime.now(tz=timezone.utc))
+    )
+    positions = await broker.get_positions()
+    assert len(positions) == 1
+    assert positions[0].units == 500
+    assert positions[0].side == OrderSide.BUY
+
+
+async def test_process_tick_ignores_other_instruments(broker: PaperBroker) -> None:
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.LIMIT, units=1000, price=149.80,
+    ))
+    filled = broker.process_tick(
+        Tick(instrument="EUR_USD", bid=1.0800, ask=1.0802, timestamp=datetime.now(tz=timezone.utc))
+    )
+    assert len(filled) == 0

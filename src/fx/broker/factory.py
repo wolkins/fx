@@ -15,7 +15,7 @@ def create_broker(
     environment: BrokerEnvironment = BrokerEnvironment.PRACTICE,
     enable_live_trading: bool = False,
     paper_balance: float = 1_000_000.0,
-) -> SafetyGuard:
+) -> BrokerAdapter:
     broker: BrokerAdapter
     if broker_type == "paper":
         broker = PaperBroker(initial_balance=paper_balance)

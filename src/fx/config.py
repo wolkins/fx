@@ -14,3 +14,10 @@ class FxConfig(BaseSettings):
     oanda_env: BrokerEnvironment = BrokerEnvironment.PRACTICE
     enable_live_trading: bool = False
     paper_balance: float = 1_000_000.0
+    execution_mode: str = "paper"
+    risk_per_trade: float = 0.005
+    daily_loss_limit: float = 0.02
+    max_open_positions: int = 3
+    max_spread_pips: float = 2.0
+    default_symbol: str = "USD_JPY"
+    default_timeframe: str = "M15"

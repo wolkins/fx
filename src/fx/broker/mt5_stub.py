@@ -5,6 +5,7 @@ from fx.broker.base import (
     BrokerCapabilities,
     BrokerEnvironment,
     Order,
+    OrderSide,
     Position,
     Tick,
 )
@@ -71,7 +72,9 @@ class MT5Adapter(BrokerAdapter):
     async def get_positions(self) -> list[Position]:
         raise NotImplementedError
 
-    async def close_position(self, instrument: str) -> bool:
+    async def close_position(
+        self, instrument: str, side: OrderSide | None = None
+    ) -> bool:
         raise NotImplementedError
 
     async def get_account_balance(self) -> float:

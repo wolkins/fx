@@ -11,7 +11,11 @@ from fx.broker.base import (
 )
 from fx.broker.oanda import OandaAdapter
 from fx.broker.paper import PaperBroker
-from fx.broker.safety import LiveTradingDisabledError, SafetyGuard
+from fx.broker.safety import (
+    LiveTradingDisabledError,
+    OrderValidationError,
+    SafetyGuard,
+)
 
 
 @pytest.fixture
@@ -23,14 +27,53 @@ def paper_guard() -> SafetyGuard:
     return SafetyGuard(b, enable_live_trading=False)
 
 
-def _make_order() -> Order:
+@pytest.fixture
+def live_guard_disabled() -> SafetyGuard:
+    return SafetyGuard(
+        OandaAdapter(account_id="test", api_token="test", environment=BrokerEnvironment.LIVE),
+        enable_live_trading=False,
+    )
+
+
+@pytest.fixture
+def live_guard_enabled() -> SafetyGuard:
+    return SafetyGuard(
+        OandaAdapter(account_id="test", api_token="test", environment=BrokerEnvironment.LIVE),
+        enable_live_trading=True,
+    )
+
+
+def _make_order(
+    *,
+    stop_loss: float | None = None,
+    take_profit: float | None = None,
+    units: int = 1000,
+    order_type: OrderType = OrderType.MARKET,
+) -> Order:
     return Order(
         id="",
         instrument="USD_JPY",
         side=OrderSide.BUY,
-        order_type=OrderType.MARKET,
-        units=1000,
+        order_type=order_type,
+        units=units,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
     )
+
+
+# --- inner access ---
+
+
+def test_no_inner_property(paper_guard: SafetyGuard) -> None:
+    assert not hasattr(paper_guard, "inner")
+
+
+def test_unsafe_inner_for_tests(paper_guard: SafetyGuard) -> None:
+    inner = paper_guard._unsafe_inner_for_tests()
+    assert isinstance(inner, PaperBroker)
+
+
+# --- practice always allowed ---
 
 
 async def test_paper_always_allowed(paper_guard: SafetyGuard) -> None:
@@ -39,50 +82,66 @@ async def test_paper_always_allowed(paper_guard: SafetyGuard) -> None:
     assert result.filled_price is not None
 
 
-async def test_live_blocked_by_default() -> None:
-    live_broker = OandaAdapter(
-        account_id="test",
-        api_token="test",
-        environment=BrokerEnvironment.LIVE,
-    )
-    guard = SafetyGuard(live_broker, enable_live_trading=False)
-    assert guard.is_live_allowed is False
+# --- live blocked ---
 
+
+async def test_live_place_order_blocked(live_guard_disabled: SafetyGuard) -> None:
     with pytest.raises(LiveTradingDisabledError):
-        await guard.place_order(_make_order())
+        await live_guard_disabled.place_order(_make_order())
 
 
-async def test_live_cancel_blocked() -> None:
-    live_broker = OandaAdapter(
-        account_id="test",
-        api_token="test",
-        environment=BrokerEnvironment.LIVE,
-    )
-    guard = SafetyGuard(live_broker, enable_live_trading=False)
+async def test_live_cancel_blocked(live_guard_disabled: SafetyGuard) -> None:
     with pytest.raises(LiveTradingDisabledError):
-        await guard.cancel_order("123")
+        await live_guard_disabled.cancel_order("123")
 
 
-async def test_live_allowed_when_enabled() -> None:
-    live_broker = OandaAdapter(
-        account_id="test",
-        api_token="test",
-        environment=BrokerEnvironment.LIVE,
-    )
-    guard = SafetyGuard(live_broker, enable_live_trading=True)
-    assert guard.is_live_allowed is True
-
-
-async def test_close_position_blocked_on_live() -> None:
-    live_broker = OandaAdapter(
-        account_id="test",
-        api_token="test",
-        environment=BrokerEnvironment.LIVE,
-    )
-    guard = SafetyGuard(live_broker, enable_live_trading=False)
-
+async def test_live_close_position_blocked(live_guard_disabled: SafetyGuard) -> None:
     with pytest.raises(LiveTradingDisabledError):
-        await guard.close_position("USD_JPY")
+        await live_guard_disabled.close_position("USD_JPY")
+
+
+# --- live enabled but SL/TP required ---
+
+
+async def test_live_market_no_sl_rejected(live_guard_enabled: SafetyGuard) -> None:
+    with pytest.raises(OrderValidationError, match="stop_loss"):
+        await live_guard_enabled.place_order(
+            _make_order(take_profit=151.0)
+        )
+
+
+async def test_live_market_no_tp_rejected(live_guard_enabled: SafetyGuard) -> None:
+    with pytest.raises(OrderValidationError, match="take_profit"):
+        await live_guard_enabled.place_order(
+            _make_order(stop_loss=149.0)
+        )
+
+
+async def test_live_limit_no_sl_allowed(live_guard_enabled: SafetyGuard) -> None:
+    # Limit orders don't require SL/TP at the SafetyGuard level
+    # (will fail at OANDA because not connected, but validation passes)
+    order = _make_order(order_type=OrderType.LIMIT)
+    order.price = 149.50
+    # No LiveTradingDisabledError or OrderValidationError should be raised
+    # The actual call will fail with RuntimeError("Not connected") which is expected
+    with pytest.raises(RuntimeError, match="Not connected"):
+        await live_guard_enabled.place_order(order)
+
+
+# --- units validation ---
+
+
+async def test_zero_units_rejected(paper_guard: SafetyGuard) -> None:
+    with pytest.raises(OrderValidationError, match="units"):
+        await paper_guard.place_order(_make_order(units=0))
+
+
+async def test_negative_units_rejected(paper_guard: SafetyGuard) -> None:
+    with pytest.raises(OrderValidationError, match="units"):
+        await paper_guard.place_order(_make_order(units=-100))
+
+
+# --- delegate read operations ---
 
 
 async def test_guard_delegates_read_operations(paper_guard: SafetyGuard) -> None:

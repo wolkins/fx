@@ -72,6 +72,11 @@ class Order:
     filled_price: float | None = None
     filled_at: datetime | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    broker_order_id: str | None = None
+    create_transaction_id: str | None = None
+    fill_transaction_id: str | None = None
+    cancel_transaction_id: str | None = None
+    reject_transaction_id: str | None = None
     broker_data: dict[str, Any] = field(default_factory=dict)
 
 
@@ -126,7 +131,9 @@ class BrokerAdapter(ABC):
     async def get_positions(self) -> list[Position]: ...
 
     @abstractmethod
-    async def close_position(self, instrument: str) -> bool: ...
+    async def close_position(
+        self, instrument: str, side: OrderSide | None = None
+    ) -> bool: ...
 
     @abstractmethod
     async def get_account_balance(self) -> float: ...

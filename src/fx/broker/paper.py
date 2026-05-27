@@ -98,10 +98,14 @@ class PaperBroker(BrokerAdapter):
     async def get_positions(self) -> list[Position]:
         return [p for p in self._positions.values() if p.units > 0]
 
-    async def close_position(self, instrument: str) -> bool:
+    async def close_position(
+        self, instrument: str, side: OrderSide | None = None
+    ) -> bool:
         if instrument not in self._positions or self._positions[instrument].units <= 0:
             return False
         pos = self._positions[instrument]
+        if side is not None and pos.side != side:
+            return False
         tick = await self.get_tick(instrument)
         close_price = tick.bid if pos.side == OrderSide.BUY else tick.ask
         if pos.side == OrderSide.BUY:
@@ -115,6 +119,39 @@ class PaperBroker(BrokerAdapter):
 
     async def get_account_balance(self) -> float:
         return self._balance
+
+    def process_tick(self, tick: Tick) -> list[Order]:
+        """Evaluate pending orders against the new tick and fill any that trigger."""
+        self._ticks[tick.instrument] = tick
+        filled: list[Order] = []
+        for order in list(self._orders.values()):
+            if order.status != OrderStatus.PENDING:
+                continue
+            if order.instrument != tick.instrument:
+                continue
+            if order.price is None:
+                continue
+
+            triggered = False
+            if order.order_type == OrderType.LIMIT:
+                if order.side == OrderSide.BUY and tick.ask <= order.price:
+                    triggered = True
+                elif order.side == OrderSide.SELL and tick.bid >= order.price:
+                    triggered = True
+            elif order.order_type == OrderType.STOP:
+                if order.side == OrderSide.BUY and tick.ask >= order.price:
+                    triggered = True
+                elif order.side == OrderSide.SELL and tick.bid <= order.price:
+                    triggered = True
+
+            if triggered:
+                fill_price = tick.ask if order.side == OrderSide.BUY else tick.bid
+                order.status = OrderStatus.FILLED
+                order.filled_price = fill_price
+                order.filled_at = datetime.now(tz=timezone.utc)
+                self._update_position(order)
+                filled.append(order)
+        return filled
 
     def _update_position(self, order: Order) -> None:
         assert order.filled_price is not None, "Cannot update position with unfilled order"
