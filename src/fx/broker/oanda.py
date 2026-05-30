@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import httpx
 
@@ -31,18 +31,85 @@ class OandaError(Exception):
         super().__init__(f"OANDA API error {status}: {body}")
 
 
+def _safe_json(resp: httpx.Response) -> dict[str, Any]:
+    try:
+        data: dict[str, Any] = resp.json()
+        return data
+    except Exception:
+        return {"raw": resp.text}
+
+
+@runtime_checkable
+class OandaTransport(Protocol):
+    """Transport seam for OANDA HTTP calls.
+
+    Production uses RealOandaTransport (httpx); tests inject a fake so the adapter can
+    be exercised without network access or credentials. request() must return the
+    parsed JSON body and raise OandaError on HTTP >= 400 (so reject handling works).
+    """
+
+    async def connect(self) -> None: ...
+
+    async def disconnect(self) -> None: ...
+
+    async def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]: ...
+
+
+class RealOandaTransport:
+    """OandaTransport backed by an httpx.AsyncClient."""
+
+    def __init__(self, account_id: str, api_token: str, base_url: str) -> None:
+        self._account_id = account_id
+        self._api_token = api_token
+        self._base_url = base_url
+        self._client: httpx.AsyncClient | None = None
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self._api_token}",
+            "Content-Type": "application/json",
+            "Accept-Datetime-Format": "RFC3339",
+        }
+
+    async def connect(self) -> None:
+        self._client = httpx.AsyncClient(
+            base_url=self._base_url,
+            headers=self._headers(),
+            timeout=30.0,
+        )
+
+    async def disconnect(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    async def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        if self._client is None:
+            raise RuntimeError("Not connected. Call connect() first.")
+        resp = await self._client.request(method, path, **kwargs)
+        data = _safe_json(resp)
+        if resp.status_code >= 400:
+            raise OandaError(resp.status_code, data)
+        return data
+
+
 class OandaAdapter(BrokerAdapter):
     def __init__(
         self,
         account_id: str,
         api_token: str,
         environment: BrokerEnvironment = BrokerEnvironment.PRACTICE,
+        transport: OandaTransport | None = None,
     ) -> None:
         self._account_id = account_id
         self._api_token = api_token
         self._environment = environment
         self._base_url = OANDA_HOSTS[environment]
-        self._client: httpx.AsyncClient | None = None
+        # transport is injectable for tests; when None a RealOandaTransport is created
+        # lazily on connect(). _owns_transport tracks whether we created it.
+        self._transport = transport
+        self._owns_transport = transport is None
+        self._connected = False
 
     @property
     def name(self) -> str:
@@ -70,53 +137,37 @@ class OandaAdapter(BrokerAdapter):
             spread_source="oanda",
         )
 
-    def _headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self._api_token}",
-            "Content-Type": "application/json",
-            "Accept-Datetime-Format": "RFC3339",
-        }
-
     async def connect(self) -> None:
-        client = httpx.AsyncClient(
-            base_url=self._base_url,
-            headers=self._headers(),
-            timeout=30.0,
-        )
+        if self._transport is None:
+            self._transport = RealOandaTransport(
+                self._account_id, self._api_token, self._base_url
+            )
+        await self._transport.connect()
         try:
-            resp = await client.get(f"/v3/accounts/{self._account_id}")
-            if resp.status_code != 200:
-                raise OandaError(resp.status_code, self._safe_json(resp))
+            # Validate credentials / connectivity (raises OandaError on >= 400).
+            await self._transport.request("GET", f"/v3/accounts/{self._account_id}")
         except Exception:
-            await client.aclose()
+            await self._transport.disconnect()
+            if self._owns_transport:
+                self._transport = None
             raise
-        self._client = client
+        self._connected = True
 
     async def disconnect(self) -> None:
-        if self._client:
-            await self._client.aclose()
-            self._client = None
+        if self._transport is not None and self._connected:
+            await self._transport.disconnect()
+        self._connected = False
+        if self._owns_transport:
+            self._transport = None
 
-    def _ensure_connected(self) -> httpx.AsyncClient:
-        if self._client is None:
+    def _ensure_connected(self) -> OandaTransport:
+        if self._transport is None or not self._connected:
             raise RuntimeError("Not connected. Call connect() first.")
-        return self._client
-
-    @staticmethod
-    def _safe_json(resp: httpx.Response) -> dict[str, Any]:
-        try:
-            data: dict[str, Any] = resp.json()
-            return data
-        except Exception:
-            return {"raw": resp.text}
+        return self._transport
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        client = self._ensure_connected()
-        resp = await client.request(method, path, **kwargs)
-        data = self._safe_json(resp)
-        if resp.status_code >= 400:
-            raise OandaError(resp.status_code, data)
-        return data
+        transport = self._ensure_connected()
+        return await transport.request(method, path, **kwargs)
 
     async def get_account_summary(self) -> dict[str, Any]:
         """Read-only: account summary (balance, currency, open trade/position counts)."""
