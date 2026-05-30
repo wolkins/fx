@@ -118,6 +118,54 @@ class OandaAdapter(BrokerAdapter):
             raise OandaError(resp.status_code, data)
         return data
 
+    async def get_account_summary(self) -> dict[str, Any]:
+        """Read-only: account summary (balance, currency, open trade/position counts)."""
+        data = await self._request(
+            "GET",
+            f"/v3/accounts/{self._account_id}/summary",
+        )
+        account: dict[str, Any] = data.get("account", {})
+        return account
+
+    async def get_instrument_details(
+        self, instruments: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Read-only: tradeable instrument definitions for the account."""
+        params: dict[str, str] = {}
+        if instruments:
+            params["instruments"] = ",".join(instruments)
+        data = await self._request(
+            "GET",
+            f"/v3/accounts/{self._account_id}/instruments",
+            params=params,
+        )
+        result: list[dict[str, Any]] = data.get("instruments", [])
+        return result
+
+    async def get_pricing(self, instrument: str) -> dict[str, Any]:
+        """Read-only: raw pricing payload for an instrument (see also get_tick)."""
+        data = await self._request(
+            "GET",
+            f"/v3/accounts/{self._account_id}/pricing",
+            params={"instruments": instrument},
+        )
+        prices: list[dict[str, Any]] = data.get("prices", [])
+        if not prices:
+            raise OandaError(404, {"message": f"No price data for {instrument}"})
+        return prices[0]
+
+    async def get_candles(
+        self, instrument: str, granularity: str = "M1", count: int = 10
+    ) -> list[dict[str, Any]]:
+        """Read-only: historical candles for an instrument."""
+        data = await self._request(
+            "GET",
+            f"/v3/instruments/{instrument}/candles",
+            params={"granularity": granularity, "count": str(count)},
+        )
+        candles: list[dict[str, Any]] = data.get("candles", [])
+        return candles
+
     async def get_tick(self, instrument: str) -> Tick:
         data = await self._request(
             "GET",
@@ -328,17 +376,65 @@ class OandaAdapter(BrokerAdapter):
                 f"/v3/accounts/{self._account_id}/positions/{instrument}/close",
                 json=body,
             )
-            return TradeClose(
-                instrument=instrument,
-                side=side or OrderSide.BUY,
-                units=0,
-                close_price=0.0,
-                pnl=0.0,
-                reason="close_position",
-                broker_data=data,
-            )
         except OandaError:
             return None
+        return self._parse_close_response(instrument, side, data)
+
+    @staticmethod
+    def _parse_close_response(
+        instrument: str, side: OrderSide | None, data: dict[str, Any]
+    ) -> TradeClose:
+        """Fill units/price/pnl/closed_at from the OANDA close fill transaction.
+
+        Falls back to zeros when the response shape is unexpected; broker_data always
+        retains the raw response for audit.
+        """
+        long_fill = data.get("longOrderFillTransaction")
+        short_fill = data.get("shortOrderFillTransaction")
+        if side == OrderSide.BUY:
+            fill = long_fill
+            close_side = OrderSide.BUY
+        elif side == OrderSide.SELL:
+            fill = short_fill
+            close_side = OrderSide.SELL
+        else:
+            fill = long_fill or short_fill
+            close_side = OrderSide.BUY if long_fill else OrderSide.SELL
+
+        units = 0
+        close_price = 0.0
+        pnl = 0.0
+        closed_at = datetime.now(tz=timezone.utc)
+        if fill:
+            try:
+                units = abs(int(float(fill.get("units", "0"))))
+            except (ValueError, TypeError):
+                units = 0
+            try:
+                close_price = float(fill.get("price", 0.0))
+            except (ValueError, TypeError):
+                close_price = 0.0
+            try:
+                pnl = float(fill.get("pl", 0.0))
+            except (ValueError, TypeError):
+                pnl = 0.0
+            time_str = fill.get("time")
+            if time_str:
+                try:
+                    closed_at = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    pass
+
+        return TradeClose(
+            instrument=instrument,
+            side=close_side,
+            units=units,
+            close_price=close_price,
+            pnl=pnl,
+            reason="close_position",
+            closed_at=closed_at,
+            broker_data=data,
+        )
 
     async def get_account_balance(self) -> float:
         data = await self._request(

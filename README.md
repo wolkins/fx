@@ -47,8 +47,27 @@ cp .env.example .env
 ## テスト
 
 ```bash
-pytest
+pytest                       # 単体テスト（OANDA practice 統合テストは除外）
+pytest -m "not oanda_practice"
 ```
+
+### OANDA practice 統合テスト
+
+practice 環境での実呼び出しテストは既定で除外されます。認証情報を環境変数で渡し、
+`-m oanda_practice` で明示実行してください。詳細は [docs/oanda_practice.md](docs/oanda_practice.md) を参照。
+
+```bash
+# read-only smoke test（注文なし）
+OANDA_ENV=practice OANDA_API_TOKEN=*** OANDA_ACCOUNT_ID=*** \
+  pytest -m oanda_practice tests/integration/oanda/test_oanda_practice_readonly.py
+
+# order smoke test（極小 units、要明示許可）
+OANDA_PRACTICE_ALLOW_ORDERS=true OANDA_PRACTICE_UNITS=1 \
+OANDA_ENV=practice OANDA_API_TOKEN=*** OANDA_ACCOUNT_ID=*** \
+  pytest -m oanda_practice tests/integration/oanda/test_oanda_practice_order.py
+```
+
+live では実行しないでください。token / account_id はログに出力しないでください。
 
 ## アーキテクチャ
 

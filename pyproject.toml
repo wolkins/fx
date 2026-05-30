@@ -31,6 +31,11 @@ packages = ["src/fx"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+addopts = "-m 'not oanda_practice'"
+markers = [
+    "integration: tests that talk to an external service (deselected by default)",
+    "oanda_practice: live calls to an OANDA practice account; require credentials, deselected by default",
+]
 
 [tool.ruff]
 target-version = "py311"
