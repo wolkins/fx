@@ -14,6 +14,8 @@ def create_broker(
     oanda_api_token: str = "",
     environment: BrokerEnvironment = BrokerEnvironment.PRACTICE,
     enable_live_trading: bool = False,
+    require_protective_orders_for_open: bool = False,
+    require_client_order_id_for_open: bool = False,
     paper_balance: float = 1_000_000.0,
 ) -> BrokerAdapter:
     broker: BrokerAdapter
@@ -32,4 +34,9 @@ def create_broker(
     else:
         raise ValueError(f"Unknown broker type: {broker_type}")
 
-    return SafetyGuard(broker, enable_live_trading=enable_live_trading)
+    return SafetyGuard(
+        broker,
+        enable_live_trading=enable_live_trading,
+        require_protective_orders_for_open=require_protective_orders_for_open,
+        require_client_order_id_for_open=require_client_order_id_for_open,
+    )

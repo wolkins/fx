@@ -25,9 +25,20 @@ class OrderValidationError(Exception):
 class SafetyGuard(BrokerAdapter):
     """Decorator that wraps a BrokerAdapter and enforces safety controls."""
 
-    def __init__(self, broker: BrokerAdapter, *, enable_live_trading: bool = False) -> None:
+    def __init__(
+        self,
+        broker: BrokerAdapter,
+        *,
+        enable_live_trading: bool = False,
+        require_protective_orders_for_open: bool = False,
+        require_client_order_id_for_open: bool = False,
+    ) -> None:
         self._broker = broker
         self._enable_live_trading = enable_live_trading
+        # Opt-in protective controls for non-live (practice/paper) environments.
+        # Live OPEN orders are always protected regardless of these flags.
+        self._require_protective_orders_for_open = require_protective_orders_for_open
+        self._require_client_order_id_for_open = require_client_order_id_for_open
 
     def _unsafe_inner_for_tests(self) -> BrokerAdapter:
         return self._broker
@@ -76,7 +87,13 @@ class SafetyGuard(BrokerAdapter):
                 f"{self._broker.name} does not support stop orders."
             )
 
-        if self._broker.environment == BrokerEnvironment.LIVE and order.intent == OrderIntent.OPEN:
+        if order.intent != OrderIntent.OPEN:
+            return
+
+        is_live = self._broker.environment == BrokerEnvironment.LIVE
+
+        # Live OPEN requires broker SL/TP capability.
+        if is_live:
             if not caps.supports_stop_loss:
                 raise LiveTradingDisabledError(
                     f"{self._broker.name} does not support stop_loss. "
@@ -87,18 +104,25 @@ class SafetyGuard(BrokerAdapter):
                     f"{self._broker.name} does not support take_profit. "
                     "Live trading requires TP capability."
                 )
+
+        # Live always enforces protective orders + client_order_id. Non-live
+        # environments enforce them only when the corresponding flag is set.
+        require_protective = is_live or self._require_protective_orders_for_open
+        require_client_id = is_live or self._require_client_order_id_for_open
+
+        scope = "Live" if is_live else "Protective mode"
+        missing: list[str] = []
+        if require_protective:
             if order.stop_loss is None:
-                raise OrderValidationError(
-                    "Live OPEN order requires stop_loss."
-                )
+                missing.append("stop_loss")
             if order.take_profit is None:
-                raise OrderValidationError(
-                    "Live OPEN order requires take_profit."
-                )
-            if not order.client_order_id:
-                raise OrderValidationError(
-                    "Live OPEN order requires client_order_id."
-                )
+                missing.append("take_profit")
+        if require_client_id and not order.client_order_id:
+            missing.append("client_order_id")
+        if missing:
+            raise OrderValidationError(
+                f"{scope} OPEN order requires {', '.join(missing)}."
+            )
 
     async def connect(self) -> None:
         await self._broker.connect()

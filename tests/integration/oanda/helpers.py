@@ -90,9 +90,22 @@ def make_oanda_adapter(settings: OandaPracticeSettings) -> OandaAdapter:
     )
 
 
-def make_safety_guard(adapter: OandaAdapter) -> SafetyGuard:
-    """Wrap the adapter in a SafetyGuard with live trading disabled."""
-    return SafetyGuard(adapter, enable_live_trading=False)
+def make_safety_guard(
+    adapter: OandaAdapter, *, protective: bool = True
+) -> SafetyGuard:
+    """Wrap the adapter in a SafetyGuard with live trading disabled.
+
+    protective=True (default) enforces live-grade OPEN safety on practice too:
+    stop_loss, take_profit, and client_order_id are required for OPEN orders.
+    Use protective=False only for tests that intentionally let an order reach OANDA
+    (e.g. to observe an OANDA-side reject payload).
+    """
+    return SafetyGuard(
+        adapter,
+        enable_live_trading=False,
+        require_protective_orders_for_open=protective,
+        require_client_order_id_for_open=protective,
+    )
 
 
 async def assert_instrument_flat(broker: BrokerAdapter, instrument: str) -> None:

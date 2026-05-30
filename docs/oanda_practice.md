@@ -69,11 +69,29 @@ OANDA_PRACTICE_ALLOW_ORDERS=true \
 
 - **発注前に対象 instrument がフラット（ポジションなし）であることを必須とする**。
   既存ポジションがあれば **fail して注文を出さない**（後述）
+- **protective mode を有効にする**（後述）。SL/TP/`client_order_id` のない OPEN は
+  OANDA 到達前に `SafetyGuard` が拒否する
 - MARKET + SL/TP + `client_order_id`（prefix `practice-smoke-`）で 1 件発注
 - broker_data に OANDA レスポンス（transaction id 等）が残る
 - 発注後（注文送信時のみ）に `close_position()` でフラット化し、対象 instrument のポジションを残さない
 - 不正 units は OANDA 到達前に `SafetyGuard` が拒否する
-- OANDA が拒否した注文は reject 情報が broker_data と監査ログに残る
+- OANDA が **実際に** 拒否した注文は reject 情報が broker_data と監査ログに残る
+  （この確認のみ protective mode を意図的に外す）
+
+### protective orders mode（practice でも live 相当の OPEN 保護）
+
+`SafetyGuard` は live OPEN に対して常に `stop_loss` / `take_profit` / `client_order_id` を必須に
+しますが、practice/paper でも同じ保護を強制できる opt-in フラグを持ちます。
+
+- `require_protective_orders_for_open=True` → OPEN に `stop_loss` と `take_profit` を必須化
+- `require_client_order_id_for_open=True` → OPEN に `client_order_id` を必須化
+- CLOSE / REDUCE は対象外
+- live OPEN は両フラグが false でも従来どおり常に必須
+
+practice 統合テストの `oanda_guard` fixture は **protective mode ON** で生成されます
+（forward test では SL/TP/client_order_id 必須）。OANDA の実 reject payload を取得する
+テストだけは、`oanda_guard_without_protective_mode_for_reject_test` fixture を使い
+**意図的に protective mode を外して** OANDA へ到達させます。
 
 ### order smoke test は対象 instrument がフラットであること
 

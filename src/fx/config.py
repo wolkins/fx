@@ -13,6 +13,9 @@ class FxConfig(BaseSettings):
     oanda_api_token: str = ""
     oanda_env: BrokerEnvironment = BrokerEnvironment.PRACTICE
     enable_live_trading: bool = False
+    # Opt-in protective controls; enforce live-grade OPEN safety in practice/paper too.
+    require_protective_orders_for_open: bool = False
+    require_client_order_id_for_open: bool = False
     paper_balance: float = 1_000_000.0
     execution_mode: str = "paper"
     risk_per_trade: float = 0.005

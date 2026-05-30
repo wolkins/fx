@@ -35,7 +35,17 @@ async def oanda_adapter(
 @pytest.fixture
 def oanda_guard(oanda_adapter: OandaAdapter) -> SafetyGuard:
     # Wraps the same connected adapter; all calls delegate to it.
-    return make_safety_guard(oanda_adapter)
+    # Protective mode ON: practice OPEN orders need SL/TP/client_order_id.
+    return make_safety_guard(oanda_adapter, protective=True)
+
+
+@pytest.fixture
+def oanda_guard_without_protective_mode_for_reject_test(
+    oanda_adapter: OandaAdapter,
+) -> SafetyGuard:
+    # Protective mode OFF so an order can intentionally reach OANDA and trigger an
+    # OANDA-side reject (used only by the actual-reject payload test).
+    return make_safety_guard(oanda_adapter, protective=False)
 
 
 @pytest.fixture

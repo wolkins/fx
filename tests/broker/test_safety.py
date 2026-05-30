@@ -156,6 +156,94 @@ async def test_live_reduce_no_sl_tp_allowed(live_guard_enabled: SafetyGuard) -> 
         await live_guard_enabled.place_order(order)
 
 
+# --- protective orders mode (non-live) ---
+
+
+@pytest.fixture
+def paper_guard_protective() -> SafetyGuard:
+    b = PaperBroker()
+    b.inject_tick(
+        Tick(instrument="USD_JPY", bid=150.0, ask=150.02, timestamp=datetime.now(tz=timezone.utc))
+    )
+    return SafetyGuard(
+        b,
+        enable_live_trading=False,
+        require_protective_orders_for_open=True,
+        require_client_order_id_for_open=True,
+    )
+
+
+def test_protective_open_without_client_order_id_rejected(
+    paper_guard_protective: SafetyGuard,
+) -> None:
+    with pytest.raises(OrderValidationError, match="client_order_id"):
+        paper_guard_protective._validate_order(
+            _make_order(stop_loss=149.0, take_profit=151.0)
+        )
+
+
+def test_protective_open_without_stop_loss_rejected(
+    paper_guard_protective: SafetyGuard,
+) -> None:
+    with pytest.raises(OrderValidationError, match="stop_loss"):
+        paper_guard_protective._validate_order(
+            _make_order(take_profit=151.0, client_order_id="x-1")
+        )
+
+
+def test_protective_open_without_take_profit_rejected(
+    paper_guard_protective: SafetyGuard,
+) -> None:
+    with pytest.raises(OrderValidationError, match="take_profit"):
+        paper_guard_protective._validate_order(
+            _make_order(stop_loss=149.0, client_order_id="x-1")
+        )
+
+
+async def test_protective_open_with_all_fields_passes(
+    paper_guard_protective: SafetyGuard,
+) -> None:
+    result = await paper_guard_protective.place_order(
+        _make_order(stop_loss=149.0, take_profit=151.0, client_order_id="x-1")
+    )
+    assert result.filled_price is not None
+
+
+def test_protective_close_allowed_without_protective_fields(
+    paper_guard_protective: SafetyGuard,
+) -> None:
+    # CLOSE bypasses protective checks (no raise).
+    paper_guard_protective._validate_order(_make_order(intent=OrderIntent.CLOSE))
+
+
+def test_protective_reduce_allowed_without_protective_fields(
+    paper_guard_protective: SafetyGuard,
+) -> None:
+    paper_guard_protective._validate_order(_make_order(intent=OrderIntent.REDUCE))
+
+
+async def test_protective_off_practice_open_no_fields_ok(paper_guard: SafetyGuard) -> None:
+    # Default practice guard (protective off) keeps legacy behaviour.
+    result = await paper_guard.place_order(_make_order())
+    assert result.filled_price is not None
+
+
+def test_require_client_order_id_only_does_not_require_sl_tp() -> None:
+    guard = SafetyGuard(PaperBroker(), require_client_order_id_for_open=True)
+    # client_order_id present, no SL/TP -> allowed.
+    guard._validate_order(_make_order(client_order_id="x-1"))
+    with pytest.raises(OrderValidationError, match="client_order_id"):
+        guard._validate_order(_make_order())
+
+
+def test_require_protective_only_does_not_require_client_order_id() -> None:
+    guard = SafetyGuard(PaperBroker(), require_protective_orders_for_open=True)
+    # SL/TP present, no client_order_id -> allowed.
+    guard._validate_order(_make_order(stop_loss=149.0, take_profit=151.0))
+    with pytest.raises(OrderValidationError, match="stop_loss"):
+        guard._validate_order(_make_order(client_order_id="x-1"))
+
+
 # --- units validation ---
 
 
