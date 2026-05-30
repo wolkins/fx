@@ -4,7 +4,16 @@ import pytest
 
 from fx.audit.events import AuditEventType
 from fx.audit.logger import InMemoryTradeLogger
-from fx.broker.base import Order, OrderIntent, OrderSide, OrderStatus, OrderType, Position, Tick
+from fx.broker.base import (
+    Order,
+    OrderIntent,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    Position,
+    Tick,
+    TradeClose,
+)
 from fx.broker.paper import PaperBroker
 from fx.execution.executor import OrderExecutor
 from fx.execution.manager import TradeManager
@@ -326,3 +335,185 @@ async def test_reverse_signal_unaffected_by_default_policy(
     )
     results = await manager.process_signal(signal, positions, 1_000_000.0)
     assert len(results) == 2
+
+
+# --- reverse / auto-reverse partial-success control ---
+
+
+class _CloseFailsBroker(PaperBroker):
+    """close_position always reports failure (no TradeClose)."""
+
+    async def close_position(
+        self, instrument: str, side: OrderSide | None = None
+    ) -> TradeClose | None:
+        return None
+
+
+class _CloseRaisesBroker(PaperBroker):
+    """close_position raises, simulating a broker error on the CLOSE leg."""
+
+    async def close_position(
+        self, instrument: str, side: OrderSide | None = None
+    ) -> TradeClose | None:
+        raise RuntimeError("simulated close failure")
+
+
+class _OpenFailsBroker(PaperBroker):
+    """place_order raises for OPEN intents once fail_open is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_open = False
+
+    async def place_order(self, order: Order) -> Order:
+        if self.fail_open and order.intent == OrderIntent.OPEN:
+            raise RuntimeError("simulated open failure")
+        return await super().place_order(order)
+
+
+def _manager_for(
+    broker: PaperBroker,
+    logger: InMemoryTradeLogger,
+    policy: PositionPolicy,
+    *,
+    raise_on_error: bool = False,
+) -> TradeManager:
+    risk = RiskManager(RiskConfig(), logger)
+    executor = OrderExecutor(broker, logger, raise_on_error=raise_on_error)
+    return TradeManager(risk, executor, logger, position_policy=policy)
+
+
+def _tick_broker(broker: PaperBroker) -> PaperBroker:
+    broker.inject_tick(Tick(instrument="USD_JPY", bid=150.0, ask=150.02, timestamp=_now()))
+    return broker
+
+
+async def test_auto_reverse_split_skips_open_when_close_fails() -> None:
+    broker = _tick_broker(_CloseFailsBroker())
+    logger = InMemoryTradeLogger()
+    manager = _manager_for(broker, logger, PositionPolicy.AUTO_REVERSE_SPLIT)
+    existing = [Position(instrument="USD_JPY", side=OrderSide.SELL, units=1000, avg_price=150.0)]
+    signal = Signal(action=SignalAction.BUY, instrument="USD_JPY", strategy_id="t", units=1000)
+
+    results = await manager.process_signal(signal, existing, 1_000_000.0)
+
+    # CLOSE was attempted (no trade_close); the dependent OPEN was not placed.
+    assert len(results) == 1
+    assert results[0].order.intent == OrderIntent.CLOSE
+    assert results[0].trade_close is None
+    assert len(logger.get_events(AuditEventType.REVERSE_OPEN_SKIPPED)) == 1
+    assert logger.get_events(AuditEventType.ORDER_FILLED) == []
+    assert await broker.get_positions() == []
+
+
+async def test_auto_reverse_split_skips_open_when_close_raises() -> None:
+    broker = _tick_broker(_CloseRaisesBroker())
+    logger = InMemoryTradeLogger()
+    manager = _manager_for(broker, logger, PositionPolicy.AUTO_REVERSE_SPLIT)
+    existing = [Position(instrument="USD_JPY", side=OrderSide.SELL, units=1000, avg_price=150.0)]
+    signal = Signal(action=SignalAction.BUY, instrument="USD_JPY", strategy_id="t", units=1000)
+
+    results = await manager.process_signal(signal, existing, 1_000_000.0)
+
+    assert len(results) == 1
+    assert results[0].order.intent == OrderIntent.CLOSE
+    assert results[0].trade_close is None
+    skipped = logger.get_events(AuditEventType.REVERSE_OPEN_SKIPPED)
+    assert len(skipped) == 1
+    assert skipped[0].reason_code == "close_leg_failed"
+
+
+async def test_reverse_to_buy_skips_open_when_close_fails() -> None:
+    broker = _tick_broker(_CloseFailsBroker())
+    logger = InMemoryTradeLogger()
+    manager = _manager_for(broker, logger, PositionPolicy.REJECT_OPPOSITE_OPEN)
+    existing = [Position(instrument="USD_JPY", side=OrderSide.SELL, units=1000, avg_price=150.0)]
+    signal = Signal(
+        action=SignalAction.REVERSE_TO_BUY, instrument="USD_JPY",
+        strategy_id="t", units=1000,
+    )
+
+    results = await manager.process_signal(signal, existing, 1_000_000.0)
+
+    assert len(results) == 1
+    assert results[0].order.intent == OrderIntent.CLOSE
+    assert len(logger.get_events(AuditEventType.REVERSE_OPEN_SKIPPED)) == 1
+
+
+async def test_auto_reverse_split_logs_open_failed_on_open_error() -> None:
+    broker = _OpenFailsBroker()
+    _tick_broker(broker)
+    # Establish a real SELL position so the CLOSE leg succeeds.
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.SELL,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    positions = await broker.get_positions()
+    broker.fail_open = True
+
+    logger = InMemoryTradeLogger()
+    manager = _manager_for(broker, logger, PositionPolicy.AUTO_REVERSE_SPLIT)
+    signal = Signal(action=SignalAction.BUY, instrument="USD_JPY", strategy_id="t", units=1000)
+
+    results = await manager.process_signal(signal, positions, 1_000_000.0)
+
+    # CLOSE succeeded; OPEN was attempted but failed.
+    assert len(results) == 2
+    assert results[0].order.intent == OrderIntent.CLOSE
+    assert results[0].trade_close is not None
+    assert results[1].order.intent == OrderIntent.OPEN
+    assert results[1].order.status != OrderStatus.FILLED
+    failed = logger.get_events(AuditEventType.REVERSE_OPEN_FAILED)
+    assert len(failed) == 1
+    assert failed[0].reason_code == "open_execution_failed"
+    # The position is now flat (the original SELL was closed, no new BUY opened).
+    assert await broker.get_positions() == []
+
+
+async def test_auto_reverse_split_logs_open_failed_on_risk_rejection() -> None:
+    broker = _tick_broker(PaperBroker())
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.SELL,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    positions = await broker.get_positions()
+
+    logger = InMemoryTradeLogger()
+    manager = _manager_for(broker, logger, PositionPolicy.AUTO_REVERSE_SPLIT)
+    # Oversized OPEN leg is rejected by RiskManager; CLOSE bypasses risk.
+    signal = Signal(
+        action=SignalAction.BUY, instrument="USD_JPY", strategy_id="t", units=200_000
+    )
+
+    results = await manager.process_signal(signal, positions, 1_000_000.0)
+
+    assert len(results) == 1
+    assert results[0].order.intent == OrderIntent.CLOSE
+    assert results[0].trade_close is not None
+    assert len(logger.get_events(AuditEventType.ORDER_REJECTED_BY_RISK)) == 1
+    failed = logger.get_events(AuditEventType.REVERSE_OPEN_FAILED)
+    assert len(failed) == 1
+    assert failed[0].reason_code == "risk_rejected"
+    assert await broker.get_positions() == []
+
+
+async def test_auto_reverse_split_happy_path_no_skip_or_fail_events() -> None:
+    broker = _tick_broker(PaperBroker())
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.SELL,
+        order_type=OrderType.MARKET, units=500,
+    ))
+    positions = await broker.get_positions()
+
+    logger = InMemoryTradeLogger()
+    manager = _manager_for(broker, logger, PositionPolicy.AUTO_REVERSE_SPLIT)
+    signal = Signal(action=SignalAction.BUY, instrument="USD_JPY", strategy_id="t", units=1000)
+
+    results = await manager.process_signal(signal, positions, 1_000_000.0)
+
+    assert len(results) == 2
+    assert logger.get_events(AuditEventType.REVERSE_OPEN_SKIPPED) == []
+    assert logger.get_events(AuditEventType.REVERSE_OPEN_FAILED) == []
+    final = await broker.get_positions()
+    assert len(final) == 1
+    assert final[0].side == OrderSide.BUY
