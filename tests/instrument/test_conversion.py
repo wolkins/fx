@@ -2,13 +2,16 @@ import pytest
 
 from fx.broker.base import OrderSide
 from fx.instrument.conversion import (
+    InvalidTradeUnitsError,
     calculate_pnl_quote_currency,
     normalize_units,
     pips_to_price,
     price_to_pips,
     round_price,
+    validate_trade_units,
 )
 from fx.instrument.registry import InstrumentRegistry
+from fx.instrument.spec import InstrumentSpec
 
 
 @pytest.fixture
@@ -57,7 +60,6 @@ def test_normalize_units_below_min(registry: InstrumentRegistry) -> None:
 
 
 def test_normalize_units_above_max() -> None:
-    from fx.instrument.spec import InstrumentSpec
     spec = InstrumentSpec(
         name="TEST", base_currency="A", quote_currency="B",
         pip_size=0.01, display_precision=3, trade_units_precision=0,
@@ -82,3 +84,33 @@ def test_pnl_buy_loss(registry: InstrumentRegistry) -> None:
     spec = registry.get("USD_JPY")
     pnl = calculate_pnl_quote_currency(OrderSide.BUY, 150.0, 149.5, 1000, spec)
     assert pnl == pytest.approx(-500.0)
+
+
+# --- validate_trade_units ---
+
+
+def test_validate_trade_units_ok(registry: InstrumentRegistry) -> None:
+    spec = registry.get("USD_JPY")
+    validate_trade_units(1000, spec)
+
+
+def test_validate_trade_units_below_min(registry: InstrumentRegistry) -> None:
+    spec = registry.get("USD_JPY")
+    with pytest.raises(InvalidTradeUnitsError, match="below min_trade_units"):
+        validate_trade_units(0, spec)
+
+
+def test_validate_trade_units_above_max() -> None:
+    spec = InstrumentSpec(
+        name="TEST", base_currency="A", quote_currency="B",
+        pip_size=0.01, display_precision=3, trade_units_precision=0,
+        min_trade_units=1, max_trade_units=1000,
+    )
+    with pytest.raises(InvalidTradeUnitsError, match="above max_trade_units"):
+        validate_trade_units(5000, spec)
+
+
+def test_validate_trade_units_no_max(registry: InstrumentRegistry) -> None:
+    spec = registry.get("USD_JPY")
+    assert spec.max_trade_units is None
+    validate_trade_units(10_000_000, spec)

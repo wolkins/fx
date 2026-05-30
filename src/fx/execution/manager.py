@@ -4,6 +4,7 @@ from fx.audit.events import AuditEvent, AuditEventType
 from fx.audit.logger import TradeLogger
 from fx.broker.base import Order, OrderIntent, OrderSide, OrderType, Position
 from fx.execution.executor import OrderExecutor
+from fx.execution.policy import PositionPolicy
 from fx.execution.result import ExecutionResult
 from fx.risk.manager import RiskManager
 from fx.signal.model import Signal, SignalAction
@@ -19,11 +20,13 @@ class TradeManager:
         executor: OrderExecutor,
         logger: TradeLogger,
         default_units: int = 1000,
+        position_policy: PositionPolicy = PositionPolicy.REJECT_OPPOSITE_OPEN,
     ) -> None:
         self._risk = risk_manager
         self._executor = executor
         self._logger = logger
         self._default_units = default_units
+        self._position_policy = position_policy
 
     async def process_signal(
         self,
@@ -88,7 +91,40 @@ class TradeManager:
         if signal.action in (SignalAction.CLOSE_BUY, SignalAction.CLOSE_SELL):
             return self._build_close_orders(signal, positions)
 
+        return self._build_open_orders(signal, positions, units)
+
+    def _build_open_orders(
+        self, signal: Signal, positions: list[Position], units: int
+    ) -> list[Order]:
         side = OrderSide.BUY if signal.action == SignalAction.BUY else OrderSide.SELL
+        opposite = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
+
+        existing = [
+            p for p in positions
+            if p.instrument == signal.instrument and p.side == opposite and p.units > 0
+        ]
+        if existing:
+            if self._position_policy == PositionPolicy.REJECT_OPPOSITE_OPEN:
+                self._logger.log(AuditEvent(
+                    event_type=AuditEventType.POSITION_POLICY_REJECTED,
+                    instrument=signal.instrument,
+                    side=side.value,
+                    units=units,
+                    strategy_id=signal.strategy_id,
+                    reason_code="opposite_position_exists",
+                    payload={
+                        "signal_id": signal.id,
+                        "action": signal.action.value,
+                        "policy": self._position_policy.value,
+                        "reason": "opposite_position_exists",
+                        "existing_side": opposite.value,
+                    },
+                ))
+                return []
+            if self._position_policy == PositionPolicy.AUTO_REVERSE_SPLIT:
+                return self._build_auto_reverse_orders(signal, existing, side, units)
+            # ALLOW_NETTING falls through to a plain OPEN that nets at the broker.
+
         return [self._make_order(
             signal=signal,
             side=side,
@@ -97,6 +133,38 @@ class TradeManager:
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
         )]
+
+    def _build_auto_reverse_orders(
+        self, signal: Signal, existing: list[Position], side: OrderSide, units: int
+    ) -> list[Order]:
+        close_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
+        self._logger.log(AuditEvent(
+            event_type=AuditEventType.REVERSE_SPLIT,
+            instrument=signal.instrument,
+            strategy_id=signal.strategy_id,
+            payload={
+                "signal_id": signal.id,
+                "close_side": close_side.value,
+                "open_side": side.value,
+                "policy": self._position_policy.value,
+            },
+        ))
+        return [
+            self._make_order(
+                signal=signal,
+                side=close_side,
+                units=existing[0].units,
+                intent=OrderIntent.CLOSE,
+            ),
+            self._make_order(
+                signal=signal,
+                side=side,
+                units=units,
+                intent=OrderIntent.OPEN,
+                stop_loss=signal.stop_loss,
+                take_profit=signal.take_profit,
+            ),
+        ]
 
     def _build_reverse_orders(
         self, signal: Signal, positions: list[Position], units: int

@@ -500,3 +500,90 @@ async def test_backtest_with_spread_pips() -> None:
         BuyThenCloseStrategy(), spread_pips=2.0, close_on_finish=False,
     ).run(_candles([150.0, 150.5, 151.0]))
     assert len(result.equity_curve) == 3
+
+
+# --- PositionPolicy ---
+
+
+class BuyThenSellStrategy(Strategy):
+    """Emits a plain BUY then a plain (opposite) SELL — exercises PositionPolicy."""
+
+    def __init__(self) -> None:
+        self._step = 0
+
+    @property
+    def strategy_id(self) -> str:
+        return "buy_then_sell"
+
+    def on_bar(self, prices: list[float], timestamp: float | None = None) -> Signal:
+        self._step += 1
+        if self._step == 2:
+            return Signal(
+                action=SignalAction.BUY, instrument="USD_JPY",
+                strategy_id=self.strategy_id, units=1000,
+            )
+        if self._step == 4:
+            return Signal(
+                action=SignalAction.SELL, instrument="USD_JPY",
+                strategy_id=self.strategy_id, units=1000,
+            )
+        return Signal(
+            action=SignalAction.HOLD, instrument="USD_JPY",
+            strategy_id=self.strategy_id,
+        )
+
+
+async def test_default_policy_rejects_opposite_open() -> None:
+    result = await BacktestEngine(
+        BuyThenSellStrategy(), close_on_finish=False,
+    ).run(_candles([150.0, 150.1, 150.2, 150.3, 150.4]))
+    rejected = [
+        e for e in result.audit_events
+        if e.event_type == AuditEventType.POSITION_POLICY_REJECTED
+    ]
+    assert len(rejected) == 1
+
+
+async def test_allow_netting_policy_in_backtest() -> None:
+    from fx.execution.policy import PositionPolicy
+
+    result = await BacktestEngine(
+        BuyThenSellStrategy(), close_on_finish=False,
+        position_policy=PositionPolicy.ALLOW_NETTING,
+    ).run(_candles([150.0, 150.1, 150.2, 150.3, 150.4]))
+    rejected = [
+        e for e in result.audit_events
+        if e.event_type == AuditEventType.POSITION_POLICY_REJECTED
+    ]
+    assert len(rejected) == 0
+
+
+# --- account currency guard ---
+
+
+class AlwaysBuyEurUsdStrategy(Strategy):
+    @property
+    def strategy_id(self) -> str:
+        return "always_buy_eur_usd"
+
+    def on_bar(self, prices: list[float], timestamp: float | None = None) -> Signal:
+        if len(prices) < 2:
+            return Signal(
+                action=SignalAction.HOLD, instrument="EUR_USD",
+                strategy_id=self.strategy_id, reason="warmup",
+            )
+        return Signal(
+            action=SignalAction.BUY, instrument="EUR_USD",
+            strategy_id=self.strategy_id, units=1000,
+        )
+
+
+async def test_jpy_account_eur_usd_close_raises_in_backtest() -> None:
+    from fx.instrument.conversion import CurrencyConversionNotSupportedError
+
+    candles = _candles([1.0800, 1.0810, 1.0820], instrument="EUR_USD")
+    engine = BacktestEngine(
+        AlwaysBuyEurUsdStrategy(), account_currency="JPY", close_on_finish=True,
+    )
+    with pytest.raises(CurrencyConversionNotSupportedError):
+        await engine.run(candles)

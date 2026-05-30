@@ -491,3 +491,113 @@ async def test_price_rounding_eur_usd() -> None:
         order_type=OrderType.MARKET, units=1000,
     ))
     assert result.filled_price == 1.08236
+
+
+# --- account currency guard ---
+
+
+async def test_jpy_account_usd_jpy_close_ok(broker: PaperBroker) -> None:
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    result = await broker.close_position("USD_JPY")
+    assert result is not None
+    assert result.instrument == "USD_JPY"
+
+
+async def test_jpy_account_eur_usd_close_raises() -> None:
+    from fx.instrument.conversion import CurrencyConversionNotSupportedError
+
+    b = PaperBroker(account_currency="JPY")
+    b.inject_tick(Tick(instrument="EUR_USD", bid=1.0800, ask=1.0802, timestamp=_now()))
+    await b.place_order(Order(
+        id="", instrument="EUR_USD", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    with pytest.raises(CurrencyConversionNotSupportedError):
+        await b.close_position("EUR_USD")
+
+
+async def test_usd_account_eur_usd_close_ok() -> None:
+    b = PaperBroker(account_currency="USD")
+    b.inject_tick(Tick(instrument="EUR_USD", bid=1.0800, ask=1.0802, timestamp=_now()))
+    await b.place_order(Order(
+        id="", instrument="EUR_USD", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    result = await b.close_position("EUR_USD")
+    assert result is not None
+    assert result.instrument == "EUR_USD"
+
+
+async def test_jpy_account_eur_usd_sl_raises() -> None:
+    from fx.instrument.conversion import CurrencyConversionNotSupportedError
+
+    b = PaperBroker(account_currency="JPY")
+    b.inject_tick(Tick(instrument="EUR_USD", bid=1.0800, ask=1.0802, timestamp=_now()))
+    await b.place_order(Order(
+        id="", instrument="EUR_USD", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000, stop_loss=1.0700,
+    ))
+    with pytest.raises(CurrencyConversionNotSupportedError):
+        b.process_tick(Tick(instrument="EUR_USD", bid=1.0650, ask=1.0652, timestamp=_now()))
+
+
+async def test_jpy_account_eur_usd_netting_raises() -> None:
+    from fx.instrument.conversion import CurrencyConversionNotSupportedError
+
+    b = PaperBroker(account_currency="JPY")
+    b.inject_tick(Tick(instrument="EUR_USD", bid=1.0800, ask=1.0802, timestamp=_now()))
+    await b.place_order(Order(
+        id="", instrument="EUR_USD", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    with pytest.raises(CurrencyConversionNotSupportedError):
+        await b.place_order(Order(
+            id="", instrument="EUR_USD", side=OrderSide.SELL,
+            order_type=OrderType.MARKET, units=1000,
+        ))
+
+
+# --- units validation ---
+
+
+async def test_units_below_min_rejected() -> None:
+    from fx.instrument.conversion import InvalidTradeUnitsError
+
+    b = PaperBroker()
+    b.inject_tick(Tick(instrument="USD_JPY", bid=150.0, ask=150.02, timestamp=_now()))
+    with pytest.raises(InvalidTradeUnitsError):
+        await b.place_order(Order(
+            id="", instrument="USD_JPY", side=OrderSide.BUY,
+            order_type=OrderType.MARKET, units=0,
+        ))
+
+
+async def test_units_above_max_rejected() -> None:
+    from fx.instrument.conversion import InvalidTradeUnitsError
+    from fx.instrument.registry import InstrumentRegistry
+    from fx.instrument.spec import InstrumentSpec
+
+    registry = InstrumentRegistry()
+    registry.register(InstrumentSpec(
+        name="USD_JPY", base_currency="USD", quote_currency="JPY",
+        pip_size=0.01, display_precision=3, trade_units_precision=0,
+        min_trade_units=1, max_trade_units=10_000,
+    ))
+    b = PaperBroker(registry=registry)
+    b.inject_tick(Tick(instrument="USD_JPY", bid=150.0, ask=150.02, timestamp=_now()))
+    with pytest.raises(InvalidTradeUnitsError):
+        await b.place_order(Order(
+            id="", instrument="USD_JPY", side=OrderSide.BUY,
+            order_type=OrderType.MARKET, units=50_000,
+        ))
+
+
+async def test_units_valid_passes(broker: PaperBroker) -> None:
+    result = await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    assert result.status == OrderStatus.FILLED

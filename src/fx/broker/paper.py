@@ -15,8 +15,14 @@ from fx.broker.base import (
     Tick,
     TradeClose,
 )
-from fx.instrument.conversion import calculate_pnl_quote_currency, round_price
+from fx.instrument.conversion import (
+    CurrencyConversionNotSupportedError,
+    calculate_pnl_quote_currency,
+    round_price,
+    validate_trade_units,
+)
 from fx.instrument.registry import InstrumentRegistry
+from fx.instrument.spec import InstrumentSpec
 
 
 class PaperBroker(BrokerAdapter):
@@ -26,12 +32,14 @@ class PaperBroker(BrokerAdapter):
         self,
         initial_balance: float = 1_000_000.0,
         registry: InstrumentRegistry | None = None,
+        account_currency: str = "JPY",
     ) -> None:
         self._balance = initial_balance
         self._orders: dict[str, Order] = {}
         self._positions: dict[str, Position] = {}
         self._ticks: dict[str, Tick] = {}
         self._registry = registry or InstrumentRegistry.default()
+        self._account_currency = account_currency
 
     @property
     def name(self) -> str:
@@ -73,8 +81,22 @@ class PaperBroker(BrokerAdapter):
             raise KeyError(f"No tick data for {instrument}. Call inject_tick() first.")
         return self._ticks[instrument]
 
+    def _ensure_account_currency(self, spec: InstrumentSpec) -> None:
+        """Guard against mixing quote-currency PnL into a different account currency.
+
+        Only instruments whose quote currency matches the account currency can have
+        their PnL applied to the single-number balance until conversion is supported.
+        """
+        if spec.quote_currency != self._account_currency:
+            raise CurrencyConversionNotSupportedError(
+                f"{spec.name} PnL is in {spec.quote_currency} but account currency is "
+                f"{self._account_currency}. Account currency conversion is not yet "
+                "supported."
+            )
+
     async def place_order(self, order: Order) -> Order:
         spec = self._registry.get(order.instrument)
+        validate_trade_units(order.units, spec)
         order.id = order.id or str(uuid.uuid4())
         now = datetime.now(tz=timezone.utc)
 
@@ -117,6 +139,7 @@ class PaperBroker(BrokerAdapter):
         if side is not None and pos.side != side:
             return None
         spec = self._registry.get(instrument)
+        self._ensure_account_currency(spec)
         tick = await self.get_tick(instrument)
         raw_close = tick.bid if pos.side == OrderSide.BUY else tick.ask
         close_price = round_price(raw_close, spec)
@@ -197,6 +220,7 @@ class PaperBroker(BrokerAdapter):
         for pos in list(self._positions.values()):
             if pos.units <= 0 or pos.instrument != instrument:
                 continue
+            self._ensure_account_currency(self._registry.get(pos.instrument))
 
             sl_hit = False
             tp_hit = False
@@ -253,6 +277,7 @@ class PaperBroker(BrokerAdapter):
         for pos in list(self._positions.values()):
             if pos.units <= 0 or pos.instrument != tick.instrument:
                 continue
+            self._ensure_account_currency(self._registry.get(pos.instrument))
 
             close_price: float | None = None
             reason = ""
@@ -324,6 +349,7 @@ class PaperBroker(BrokerAdapter):
             if order.take_profit is not None:
                 pos.take_profit = order.take_profit
         else:
+            self._ensure_account_currency(self._registry.get(order.instrument))
             if pos.side == OrderSide.BUY:
                 pnl = (fill_price - pos.avg_price) * min(order.units, pos.units)
             else:

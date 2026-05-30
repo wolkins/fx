@@ -15,6 +15,7 @@ from fx.broker.base import OrderSide, Tick, TradeClose
 from fx.broker.paper import PaperBroker
 from fx.execution.executor import OrderExecutor
 from fx.execution.manager import TradeManager
+from fx.execution.policy import PositionPolicy
 from fx.instrument.conversion import pips_to_price
 from fx.instrument.registry import InstrumentRegistry
 from fx.risk.config import RiskConfig
@@ -33,6 +34,8 @@ class BacktestEngine:
         close_on_finish: bool = True,
         sl_tp_mode: str = "close_only",
         registry: InstrumentRegistry | None = None,
+        account_currency: str = "JPY",
+        position_policy: PositionPolicy = PositionPolicy.REJECT_OPPOSITE_OPEN,
     ) -> None:
         self._strategy = strategy
         self._initial_balance = initial_balance
@@ -41,6 +44,8 @@ class BacktestEngine:
         self._spread = spread
         self._spread_pips = spread_pips
         self._close_on_finish = close_on_finish
+        self._account_currency = account_currency
+        self._position_policy = position_policy
         if sl_tp_mode not in ("close_only", "ohlc_conservative"):
             raise ValueError(
                 f"Invalid sl_tp_mode: {sl_tp_mode!r}. "
@@ -56,12 +61,16 @@ class BacktestEngine:
 
     async def run(self, candles: list[BacktestCandle]) -> BacktestResult:
         broker = PaperBroker(
-            initial_balance=self._initial_balance, registry=self._registry,
+            initial_balance=self._initial_balance,
+            registry=self._registry,
+            account_currency=self._account_currency,
         )
         logger = InMemoryTradeLogger()
         risk = RiskManager(self._risk_config, logger)
         executor = OrderExecutor(broker, logger, raise_on_error=False)
-        manager = TradeManager(risk, executor, logger)
+        manager = TradeManager(
+            risk, executor, logger, position_policy=self._position_policy
+        )
 
         trades: list[BacktestTrade] = []
         equity_curve: list[float] = []

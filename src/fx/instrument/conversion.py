@@ -4,6 +4,19 @@ from fx.broker.base import OrderSide
 from fx.instrument.spec import InstrumentSpec
 
 
+class CurrencyConversionNotSupportedError(Exception):
+    """Raised when a PnL in quote currency would be applied to a balance held in a
+    different account currency. Account currency conversion is not yet implemented.
+
+    TODO: accept conversion_rates (quote -> account) so cross-currency instruments
+    such as EUR_USD can settle into a JPY account.
+    """
+
+
+class InvalidTradeUnitsError(Exception):
+    """Raised when an order's units violate the InstrumentSpec trade-unit constraints."""
+
+
 def round_price(price: float, spec: InstrumentSpec) -> float:
     return round(price, spec.display_precision)
 
@@ -24,6 +37,29 @@ def normalize_units(units: int, spec: InstrumentSpec) -> int:
     if spec.max_trade_units is not None and units > spec.max_trade_units:
         return spec.max_trade_units
     return units
+
+
+def validate_trade_units(units: int, spec: InstrumentSpec) -> None:
+    """Reject orders whose units violate the InstrumentSpec constraints.
+
+    We prefer an explicit rejection over silently rounding (see normalize_units),
+    so violations stay visible in the audit trail.
+
+    TODO: wire this into RiskManager so notional/margin limits are enforced too.
+    """
+    if units < spec.min_trade_units:
+        raise InvalidTradeUnitsError(
+            f"{spec.name}: units {units} below min_trade_units {spec.min_trade_units}"
+        )
+    if spec.max_trade_units is not None and units > spec.max_trade_units:
+        raise InvalidTradeUnitsError(
+            f"{spec.name}: units {units} above max_trade_units {spec.max_trade_units}"
+        )
+    if spec.trade_units_precision == 0 and int(units) != units:
+        raise InvalidTradeUnitsError(
+            f"{spec.name}: units {units} must be a whole number "
+            f"(trade_units_precision=0)"
+        )
 
 
 def calculate_pnl_quote_currency(

@@ -8,6 +8,7 @@ from fx.broker.base import Order, OrderIntent, OrderSide, OrderStatus, OrderType
 from fx.broker.paper import PaperBroker
 from fx.execution.executor import OrderExecutor
 from fx.execution.manager import TradeManager
+from fx.execution.policy import PositionPolicy
 from fx.risk.config import RiskConfig
 from fx.risk.manager import RiskManager
 from fx.signal.model import Signal, SignalAction
@@ -204,3 +205,124 @@ async def test_projected_position_size_blocks(
     signal = Signal(action=SignalAction.BUY, instrument="USD_JPY", strategy_id="test", units=20_000)
     results = await manager.process_signal(signal, existing, 1_000_000.0)
     assert results == []
+
+
+# --- PositionPolicy ---
+
+
+def _manager_with_policy(
+    broker: PaperBroker, logger: InMemoryTradeLogger, policy: PositionPolicy
+) -> TradeManager:
+    risk = RiskManager(RiskConfig(), logger)
+    executor = OrderExecutor(broker, logger)
+    return TradeManager(risk, executor, logger, position_policy=policy)
+
+
+async def test_reject_opposite_open_buy_against_sell(
+    system: tuple[PaperBroker, InMemoryTradeLogger, TradeManager],
+) -> None:
+    _, logger, manager = system
+    existing = [Position(instrument="USD_JPY", side=OrderSide.SELL, units=1000, avg_price=150.0)]
+    signal = Signal(action=SignalAction.BUY, instrument="USD_JPY", strategy_id="test", units=1000)
+    results = await manager.process_signal(signal, existing, 1_000_000.0)
+    assert results == []
+    rejected = logger.get_events(AuditEventType.POSITION_POLICY_REJECTED)
+    assert len(rejected) == 1
+    assert rejected[0].payload["reason"] == "opposite_position_exists"
+    assert rejected[0].payload["existing_side"] == "sell"
+    assert len(logger.get_events(AuditEventType.ORDER_FILLED)) == 0
+
+
+async def test_reject_opposite_open_sell_against_buy(
+    system: tuple[PaperBroker, InMemoryTradeLogger, TradeManager],
+) -> None:
+    _, logger, manager = system
+    existing = [Position(instrument="USD_JPY", side=OrderSide.BUY, units=1000, avg_price=150.0)]
+    signal = Signal(action=SignalAction.SELL, instrument="USD_JPY", strategy_id="test", units=1000)
+    results = await manager.process_signal(signal, existing, 1_000_000.0)
+    assert results == []
+    assert len(logger.get_events(AuditEventType.POSITION_POLICY_REJECTED)) == 1
+
+
+async def test_reject_opposite_open_allows_same_side(
+    system: tuple[PaperBroker, InMemoryTradeLogger, TradeManager],
+) -> None:
+    """Adding to a same-side position is not an opposite open and must be allowed."""
+    _, _, manager = system
+    existing = [Position(instrument="USD_JPY", side=OrderSide.BUY, units=1000, avg_price=150.0)]
+    signal = Signal(action=SignalAction.BUY, instrument="USD_JPY", strategy_id="test", units=1000)
+    results = await manager.process_signal(signal, existing, 1_000_000.0)
+    assert len(results) == 1
+    assert results[0].order.intent == OrderIntent.OPEN
+
+
+async def test_reject_opposite_open_with_no_position(
+    system: tuple[PaperBroker, InMemoryTradeLogger, TradeManager],
+) -> None:
+    _, _, manager = system
+    signal = Signal(action=SignalAction.BUY, instrument="USD_JPY", strategy_id="test", units=1000)
+    results = await manager.process_signal(signal, [], 1_000_000.0)
+    assert len(results) == 1
+    assert results[0].order.side == OrderSide.BUY
+
+
+async def test_allow_netting_opens_against_opposite(
+    system: tuple[PaperBroker, InMemoryTradeLogger, TradeManager],
+) -> None:
+    broker, logger, _ = system
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.SELL,
+        order_type=OrderType.MARKET, units=500,
+    ))
+    positions = await broker.get_positions()
+    manager = _manager_with_policy(broker, logger, PositionPolicy.ALLOW_NETTING)
+
+    signal = Signal(action=SignalAction.BUY, instrument="USD_JPY", strategy_id="test", units=1000)
+    results = await manager.process_signal(signal, positions, 1_000_000.0)
+    assert len(results) == 1
+    assert results[0].order.intent == OrderIntent.OPEN
+    assert results[0].order.side == OrderSide.BUY
+    assert len(logger.get_events(AuditEventType.POSITION_POLICY_REJECTED)) == 0
+
+
+async def test_auto_reverse_split_decomposes(
+    system: tuple[PaperBroker, InMemoryTradeLogger, TradeManager],
+) -> None:
+    broker, logger, _ = system
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.SELL,
+        order_type=OrderType.MARKET, units=500,
+    ))
+    positions = await broker.get_positions()
+    manager = _manager_with_policy(broker, logger, PositionPolicy.AUTO_REVERSE_SPLIT)
+
+    signal = Signal(action=SignalAction.BUY, instrument="USD_JPY", strategy_id="test", units=1000)
+    results = await manager.process_signal(signal, positions, 1_000_000.0)
+    assert len(results) == 2
+    assert results[0].order.intent == OrderIntent.CLOSE
+    assert results[0].trade_close is not None
+    assert results[1].order.intent == OrderIntent.OPEN
+    assert results[1].order.side == OrderSide.BUY
+
+    final = await broker.get_positions()
+    assert len(final) == 1
+    assert final[0].side == OrderSide.BUY
+    assert len(logger.get_events(AuditEventType.REVERSE_SPLIT)) == 1
+
+
+async def test_reverse_signal_unaffected_by_default_policy(
+    system: tuple[PaperBroker, InMemoryTradeLogger, TradeManager],
+) -> None:
+    """REVERSE_TO_* always decomposes regardless of REJECT_OPPOSITE_OPEN default."""
+    broker, _, manager = system
+    await broker.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.SELL,
+        order_type=OrderType.MARKET, units=500,
+    ))
+    positions = await broker.get_positions()
+    signal = Signal(
+        action=SignalAction.REVERSE_TO_BUY, instrument="USD_JPY",
+        strategy_id="test", units=1000,
+    )
+    results = await manager.process_signal(signal, positions, 1_000_000.0)
+    assert len(results) == 2
