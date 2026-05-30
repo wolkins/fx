@@ -15,6 +15,8 @@ from fx.broker.base import OrderSide, Tick, TradeClose
 from fx.broker.paper import PaperBroker
 from fx.execution.executor import OrderExecutor
 from fx.execution.manager import TradeManager
+from fx.instrument.conversion import pips_to_price
+from fx.instrument.registry import InstrumentRegistry
 from fx.risk.config import RiskConfig
 from fx.risk.manager import RiskManager
 from fx.strategy.base import Strategy
@@ -27,13 +29,17 @@ class BacktestEngine:
         initial_balance: float = 1_000_000.0,
         risk_config: RiskConfig | None = None,
         spread: float = 0.02,
+        spread_pips: float | None = None,
         close_on_finish: bool = True,
         sl_tp_mode: str = "close_only",
+        registry: InstrumentRegistry | None = None,
     ) -> None:
         self._strategy = strategy
         self._initial_balance = initial_balance
         self._risk_config = risk_config or RiskConfig()
+        self._registry = registry or InstrumentRegistry.default()
         self._spread = spread
+        self._spread_pips = spread_pips
         self._close_on_finish = close_on_finish
         if sl_tp_mode not in ("close_only", "ohlc_conservative"):
             raise ValueError(
@@ -42,8 +48,16 @@ class BacktestEngine:
             )
         self._sl_tp_mode = sl_tp_mode
 
+    def _spread_for(self, instrument: str) -> float:
+        if self._spread_pips is not None:
+            spec = self._registry.get(instrument)
+            return pips_to_price(self._spread_pips, spec)
+        return self._spread
+
     async def run(self, candles: list[BacktestCandle]) -> BacktestResult:
-        broker = PaperBroker(initial_balance=self._initial_balance)
+        broker = PaperBroker(
+            initial_balance=self._initial_balance, registry=self._registry,
+        )
         logger = InMemoryTradeLogger()
         risk = RiskManager(self._risk_config, logger)
         executor = OrderExecutor(broker, logger, raise_on_error=False)
@@ -67,7 +81,7 @@ class BacktestEngine:
             if self._sl_tp_mode == "ohlc_conservative":
                 ohlc_closes = broker.process_ohlc_sl_tp(
                     candle.instrument, candle.high, candle.low, candle.close,
-                    self._spread, timestamp=candle.timestamp,
+                    self._spread_for(candle.instrument), timestamp=candle.timestamp,
                 )
                 for tc in ohlc_closes:
                     trades.append(self._to_backtest_trade(tc, self._strategy.strategy_id))
@@ -135,7 +149,7 @@ class BacktestEngine:
         )
 
     def _candle_to_tick(self, candle: BacktestCandle) -> Tick:
-        half_spread = self._spread / 2
+        half_spread = self._spread_for(candle.instrument) / 2
         return Tick(
             instrument=candle.instrument,
             bid=candle.close - half_spread,

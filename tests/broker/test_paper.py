@@ -451,3 +451,43 @@ async def test_position_preserves_sl_tp(broker: PaperBroker) -> None:
     positions = await broker.get_positions()
     assert positions[0].stop_loss == 149.50
     assert positions[0].take_profit == 151.00
+
+
+# --- InstrumentSpec integration ---
+
+
+async def test_unknown_instrument_rejected() -> None:
+    from fx.instrument.registry import UnknownInstrumentError
+    b = PaperBroker()
+    b.inject_tick(
+        Tick(instrument="UNKNOWN_PAIR", bid=1.0, ask=1.01, timestamp=_now())
+    )
+    with pytest.raises(UnknownInstrumentError):
+        await b.place_order(Order(
+            id="", instrument="UNKNOWN_PAIR", side=OrderSide.BUY,
+            order_type=OrderType.MARKET, units=1000,
+        ))
+
+
+async def test_price_rounding_usd_jpy() -> None:
+    b = PaperBroker()
+    b.inject_tick(
+        Tick(instrument="USD_JPY", bid=150.0001234, ask=150.0235678, timestamp=_now())
+    )
+    result = await b.place_order(Order(
+        id="", instrument="USD_JPY", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    assert result.filled_price == 150.024
+
+
+async def test_price_rounding_eur_usd() -> None:
+    b = PaperBroker()
+    b.inject_tick(
+        Tick(instrument="EUR_USD", bid=1.082345678, ask=1.082356789, timestamp=_now())
+    )
+    result = await b.place_order(Order(
+        id="", instrument="EUR_USD", side=OrderSide.BUY,
+        order_type=OrderType.MARKET, units=1000,
+    ))
+    assert result.filled_price == 1.08236

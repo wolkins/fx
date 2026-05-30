@@ -15,16 +15,23 @@ from fx.broker.base import (
     Tick,
     TradeClose,
 )
+from fx.instrument.conversion import calculate_pnl_quote_currency, round_price
+from fx.instrument.registry import InstrumentRegistry
 
 
 class PaperBroker(BrokerAdapter):
     """In-memory simulated broker for backtesting and paper trading."""
 
-    def __init__(self, initial_balance: float = 1_000_000.0) -> None:
+    def __init__(
+        self,
+        initial_balance: float = 1_000_000.0,
+        registry: InstrumentRegistry | None = None,
+    ) -> None:
         self._balance = initial_balance
         self._orders: dict[str, Order] = {}
         self._positions: dict[str, Position] = {}
         self._ticks: dict[str, Tick] = {}
+        self._registry = registry or InstrumentRegistry.default()
 
     @property
     def name(self) -> str:
@@ -67,14 +74,15 @@ class PaperBroker(BrokerAdapter):
         return self._ticks[instrument]
 
     async def place_order(self, order: Order) -> Order:
+        spec = self._registry.get(order.instrument)
         order.id = order.id or str(uuid.uuid4())
         now = datetime.now(tz=timezone.utc)
 
         if order.order_type == OrderType.MARKET:
             tick = await self.get_tick(order.instrument)
-            fill_price = tick.ask if order.side == OrderSide.BUY else tick.bid
+            raw_price = tick.ask if order.side == OrderSide.BUY else tick.bid
             order.status = OrderStatus.FILLED
-            order.filled_price = fill_price
+            order.filled_price = round_price(raw_price, spec)
             order.filled_at = now
             self._update_position(order)
         else:
@@ -108,12 +116,11 @@ class PaperBroker(BrokerAdapter):
         pos = self._positions[instrument]
         if side is not None and pos.side != side:
             return None
+        spec = self._registry.get(instrument)
         tick = await self.get_tick(instrument)
-        close_price = tick.bid if pos.side == OrderSide.BUY else tick.ask
-        if pos.side == OrderSide.BUY:
-            pnl = (close_price - pos.avg_price) * pos.units
-        else:
-            pnl = (pos.avg_price - close_price) * pos.units
+        raw_close = tick.bid if pos.side == OrderSide.BUY else tick.ask
+        close_price = round_price(raw_close, spec)
+        pnl = calculate_pnl_quote_currency(pos.side, pos.avg_price, close_price, pos.units, spec)
         result = TradeClose(
             instrument=instrument,
             side=pos.side,

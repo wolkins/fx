@@ -475,3 +475,28 @@ async def test_market_orders_in_backtest_result() -> None:
     )
     filled_orders = [o for o in result.orders if o.filled_price is not None]
     assert len(filled_orders) >= 1
+
+
+# --- spread_pips ---
+
+
+def test_spread_pips_usd_jpy() -> None:
+    engine = BacktestEngine(AlwaysBuyStrategy(), spread_pips=2.0)
+    assert engine._spread_for("USD_JPY") == pytest.approx(0.02)
+
+
+def test_spread_pips_eur_usd() -> None:
+    engine = BacktestEngine(AlwaysBuyStrategy(), spread_pips=2.0)
+    assert engine._spread_for("EUR_USD") == pytest.approx(0.0002)
+
+
+def test_spread_pips_fallback_to_spread() -> None:
+    engine = BacktestEngine(AlwaysBuyStrategy(), spread=0.05)
+    assert engine._spread_for("USD_JPY") == pytest.approx(0.05)
+
+
+async def test_backtest_with_spread_pips() -> None:
+    result = await BacktestEngine(
+        BuyThenCloseStrategy(), spread_pips=2.0, close_on_finish=False,
+    ).run(_candles([150.0, 150.5, 151.0]))
+    assert len(result.equity_curve) == 3
