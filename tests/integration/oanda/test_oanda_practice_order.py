@@ -21,7 +21,10 @@ from fx.broker.base import Order, OrderIntent, OrderSide, OrderType
 from fx.broker.oanda import OandaAdapter
 from fx.broker.safety import SafetyGuard
 from fx.execution.executor import OrderExecutor
-from tests.integration.oanda.helpers import OandaPracticeSettings
+from tests.integration.oanda.helpers import (
+    OandaPracticeSettings,
+    assert_instrument_flat,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.oanda_practice]
 
@@ -50,6 +53,10 @@ async def test_market_order_round_trip(
     units = practice_settings.units
     assert units <= 10, "refusing to trade more than 10 units in a smoke test"
 
+    # Preflight: refuse to run unless the instrument is flat, so our cleanup cannot
+    # close a pre-existing position.
+    await assert_instrument_flat(oanda_guard, instrument)
+
     tick = await oanda_guard.get_tick(instrument)
     stop_loss, take_profit = await _sl_tp_for_buy(
         oanda_adapter, instrument, tick.bid, tick.ask
@@ -71,7 +78,9 @@ async def test_market_order_round_trip(
     logger = InMemoryTradeLogger()
     executor = OrderExecutor(oanda_guard, logger, raise_on_error=False)
 
+    order_submitted = False
     try:
+        order_submitted = True  # the order may reach the broker from here on
         result = await executor.execute(order)
         placed = result.order
         # The raw OANDA response must be retained for audit (transaction tracking).
@@ -84,7 +93,10 @@ async def test_market_order_round_trip(
         # broker_data must be sanitizable without leaking secrets.
         sanitize_broker_data(placed.broker_data)
     finally:
-        await oanda_guard.close_position(instrument, side=OrderSide.BUY)
+        # Only flatten if we actually submitted; the preflight guaranteed flatness, so
+        # any remaining position must be ours.
+        if order_submitted:
+            await oanda_guard.close_position(instrument, side=OrderSide.BUY)
         positions = await oanda_guard.get_positions()
         remaining = [p for p in positions if p.instrument == instrument]
         assert remaining == [], f"position for {instrument} must not remain open"

@@ -388,6 +388,12 @@ class OandaAdapter(BrokerAdapter):
 
         Falls back to zeros when the response shape is unexpected; broker_data always
         retains the raw response for audit.
+
+        Prefer calling close_position() with an explicit side. When side is None and
+        both long and short legs are closed at once, only the long leg is reflected in
+        the returned TradeClose (the short leg still lives in broker_data).
+        TODO: return list[TradeClose] (or add close_all_positions()) so both legs of a
+        hedged position are represented individually.
         """
         long_fill = data.get("longOrderFillTransaction")
         short_fill = data.get("shortOrderFillTransaction")

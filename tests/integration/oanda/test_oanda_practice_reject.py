@@ -18,7 +18,10 @@ from fx.broker.base import Order, OrderIntent, OrderSide, OrderType
 from fx.broker.oanda import OandaAdapter
 from fx.broker.safety import OrderValidationError, SafetyGuard
 from fx.execution.executor import OrderExecutor
-from tests.integration.oanda.helpers import OandaPracticeSettings
+from tests.integration.oanda.helpers import (
+    OandaPracticeSettings,
+    assert_instrument_flat,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.oanda_practice]
 
@@ -50,6 +53,10 @@ async def test_oanda_reject_payload_is_audited(
     instrument = practice_settings.instrument
     units = practice_settings.units
 
+    # Preflight: refuse to run unless the instrument is flat, so any cleanup we do
+    # cannot close a pre-existing position.
+    await assert_instrument_flat(oanda_guard, instrument)
+
     details = await oanda_adapter.get_instrument_details([instrument])
     target = next(d for d in details if d["name"] == instrument)
     precision = int(target["displayPrecision"])
@@ -74,7 +81,9 @@ async def test_oanda_reject_payload_is_audited(
     logger = InMemoryTradeLogger()
     executor = OrderExecutor(oanda_guard, logger, raise_on_error=False)
 
+    order_submitted = False
     try:
+        order_submitted = True  # the order may reach the broker from here on
         result = await executor.execute(order)
         # Should not have filled; reject info must be retained.
         assert result.order.broker_data, "broker_data must retain the OANDA response"
@@ -90,7 +99,9 @@ async def test_oanda_reject_payload_is_audited(
             or AuditEventType.ORDER_FAILED in events
         ), "expected a reject/failure audit event"
     finally:
-        # Defensive: ensure nothing accidentally opened.
-        await oanda_guard.close_position(instrument, side=OrderSide.BUY)
+        # Defensive: only flatten if we submitted. The preflight guaranteed flatness,
+        # so any remaining position must be ours.
+        if order_submitted:
+            await oanda_guard.close_position(instrument, side=OrderSide.BUY)
         positions = await oanda_guard.get_positions()
         assert [p for p in positions if p.instrument == instrument] == []

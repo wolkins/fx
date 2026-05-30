@@ -67,11 +67,27 @@ OANDA_PRACTICE_ALLOW_ORDERS=true \
 
 確認内容：
 
+- **発注前に対象 instrument がフラット（ポジションなし）であることを必須とする**。
+  既存ポジションがあれば **fail して注文を出さない**（後述）
 - MARKET + SL/TP + `client_order_id`（prefix `practice-smoke-`）で 1 件発注
 - broker_data に OANDA レスポンス（transaction id 等）が残る
-- 発注後に必ず `close_position()` でフラット化し、対象 instrument のポジションを残さない
+- 発注後（注文送信時のみ）に `close_position()` でフラット化し、対象 instrument のポジションを残さない
 - 不正 units は OANDA 到達前に `SafetyGuard` が拒否する
 - OANDA が拒否した注文は reject 情報が broker_data と監査ログに残る
+
+### order smoke test は対象 instrument がフラットであること
+
+`close_position()` は **instrument + side 単位** でクローズします。そのため、対象 instrument に
+既存ポジションがある状態で order smoke test を実行すると、テスト用の極小注文だけでなく
+**既存ポジション全体を閉じてしまう** 危険があります。
+
+これを防ぐため、order smoke test と OANDA reject test は **発注前に preflight チェック**
+（`assert_instrument_flat`）を実行します。
+
+- 対象 instrument にポジションが 1 件でもあれば **fail し、注文を出しません**
+- クリーンアップ（`close_position`）は **実際に注文を送信した場合のみ** 実行します
+- **専用の空 practice 口座** での実行を推奨します
+- 既存ポジションがある場合は、Web 取引画面または手動で対象 instrument をフラットにしてから再実行してください
 
 ### 既定（オフライン / CI）
 
@@ -79,6 +95,14 @@ OANDA_PRACTICE_ALLOW_ORDERS=true \
 .venv/bin/python -m pytest            # oanda_practice は除外
 .venv/bin/python -m pytest -m "not oanda_practice"
 ```
+
+## close_position の方針
+
+`close_position()` は **side 指定クローズを原則** とします。`side=None` は long/short 両方の
+クローズになり得ますが、現状 `_parse_close_response()` は片側の `TradeClose` のみ返します
+（もう片側は `broker_data` に残ります）。両建てを個別に表現したい場合は将来
+`list[TradeClose]` を返す設計を検討します（コード内 TODO 参照）。practice 検証では
+side 指定クローズを使ってください。
 
 ## live では実行しない
 

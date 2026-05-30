@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from fx.broker.base import BrokerEnvironment
+from fx.broker.base import BrokerAdapter, BrokerEnvironment
 from fx.broker.oanda import OandaAdapter
 from fx.broker.safety import SafetyGuard
 
@@ -93,3 +93,22 @@ def make_oanda_adapter(settings: OandaPracticeSettings) -> OandaAdapter:
 def make_safety_guard(adapter: OandaAdapter) -> SafetyGuard:
     """Wrap the adapter in a SafetyGuard with live trading disabled."""
     return SafetyGuard(adapter, enable_live_trading=False)
+
+
+async def assert_instrument_flat(broker: BrokerAdapter, instrument: str) -> None:
+    """Refuse to run an order smoke test unless the target instrument is flat.
+
+    close_position() operates per instrument+side, so an order smoke test that runs
+    against an account already holding a position for this instrument would close that
+    pre-existing position in its cleanup step. Fail loudly instead of risking that.
+
+    Does not log token/account_id (only the instrument name appears in the message).
+    """
+    positions = await broker.get_positions()
+    existing = [p for p in positions if p.instrument == instrument]
+    if existing:
+        pytest.fail(
+            f"Refusing to run OANDA order smoke: existing position(s) found for "
+            f"{instrument}. Use a dedicated empty practice account, or manually close "
+            f"positions for {instrument} before running."
+        )
